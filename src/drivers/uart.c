@@ -19,9 +19,6 @@ typedef struct {
     volatile uint16_t tail;  /* Read index (main) */
 } ring_buffer_t;
 
-/* Temporary deleteme */
-volatile uint32_t uart4_rx_count = 0;
-
 /* UART handles and buffers */
 static UART_HandleTypeDef huart4;
 static ring_buffer_t uart4_rx_buf;
@@ -160,10 +157,7 @@ static bool uart4_init(uint32_t baudrate)
     huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
     huart4.Init.OverSampling = UART_OVERSAMPLING_16;
     huart4.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-
-    /* Enable TX/RX pin swap - Nexus routes PA0 to RX, PA1 to TX */
-    huart4.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_SWAP_INIT;
-    huart4.AdvancedInit.Swap = UART_ADVFEATURE_SWAP_ENABLE;
+    huart4.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
     
     if (HAL_UART_Init(&huart4) != HAL_OK) {
         return false;
@@ -193,9 +187,6 @@ void UART4_IRQHandler(void)
             /* Buffer not full */
             uart4_rx_buf.data[uart4_rx_buf.head] = data;
             uart4_rx_buf.head = next_head;
-      
-            /* temp deleteme */
-            uart4_rx_count++;
         }
         /* If buffer full, data is dropped */
     }

@@ -9,6 +9,7 @@
 #include "usb_cdc.h"
 #include "icm42688.h"
 #include "crsf.h"
+#include "pwm.h"
 #include <string.h>
 
 /* Forward declarations for driver stubs */
@@ -29,6 +30,9 @@ static bool imu_ok = false;
 
 /* CRSF state */
 static bool crsf_ok = false;
+
+/* PWM state */
+static bool pwm_ok = false;
 
 /* Simple printf helper for integers */
 static void print_int(int32_t val)
@@ -124,6 +128,12 @@ int main(void)
             } else {
                 usb_cdc_print("NOT INITIALIZED\r\n");
             }
+            usb_cdc_print("PWM:  ");
+            if (pwm_ok) {
+                usb_cdc_print("5 channels ready\r\n");
+            } else {
+                usb_cdc_print("NOT INITIALIZED\r\n");
+            }
             usb_cdc_print("\r\n> ");
             sent_banner = true;
         }
@@ -211,6 +221,8 @@ static void cli_process_line(const char *line)
         usb_cdc_print("  gyroraw   - Show raw gyro values\r\n");
         usb_cdc_print("  cal       - Calibrate gyro (keep device still!)\r\n");
         usb_cdc_print("  crsf      - Show live CRSF channel data\r\n");
+        usb_cdc_print("  servo N P - Set servo N (0-4) to pulse P (1000-2000)\r\n");
+        usb_cdc_print("  pass      - Passthrough mode: CRSF -> servos (any key to stop)\r\n");
         usb_cdc_print("  dfu       - Reboot to DFU bootloader\r\n");
         usb_cdc_print("  reboot    - Reboot system\r\n");
     }
@@ -254,13 +266,6 @@ static void cli_process_line(const char *line)
         } else {
             usb_cdc_print("NOT INITIALIZED\r\n");
         }
-
-        /* temp deleteme */
-        extern volatile uint32_t uart4_rx_count;
-        usb_cdc_print("  UART4 RX: ");
-        print_int(uart4_rx_count);
-        usb_cdc_print(" bytes\r\n");
-
         
         usb_cdc_print("  ESC:      Not initialized\r\n");
         
@@ -391,6 +396,95 @@ static void cli_process_line(const char *line)
         usb_cdc_read_byte();
         usb_cdc_print("\r\n");
     }
+    else if (strncmp(line, "servo ", 6) == 0) {
+        if (!pwm_ok) {
+            usb_cdc_print("Error: PWM not initialized\r\n");
+            return;
+        }
+        /* Parse "servo N P" */
+        int channel = -1;
+        int pulse = -1;
+        const char *p = line + 6;
+        
+        /* Parse channel number */
+        while (*p == ' ') p++;
+        if (*p >= '0' && *p <= '4') {
+            channel = *p - '0';
+            p++;
+        }
+        
+        /* Parse pulse width */
+        while (*p == ' ') p++;
+        if (*p >= '0' && *p <= '9') {
+            pulse = 0;
+            while (*p >= '0' && *p <= '9') {
+                pulse = pulse * 10 + (*p - '0');
+                p++;
+            }
+        }
+        
+        if (channel < 0 || channel > 4 || pulse < 500 || pulse > 2500) {
+            usb_cdc_print("Usage: servo <0-4> <1000-2000>\r\n");
+            usb_cdc_print("  0=steering, 1=throttle, 2=ebrake, 3=aux, 4=motor\r\n");
+            return;
+        }
+        
+        pwm_set_pulse((pwm_channel_t)channel, (uint16_t)pulse);
+        usb_cdc_print("Set servo ");
+        print_int(channel);
+        usb_cdc_print(" to ");
+        print_int(pulse);
+        usb_cdc_print("us\r\n");
+    }
+    else if (strcmp(line, "pass") == 0) {
+        if (!crsf_ok || !pwm_ok) {
+            usb_cdc_print("Error: CRSF and PWM must be initialized\r\n");
+            return;
+        }
+        usb_cdc_print("Passthrough mode: CRSF -> Servos (any key to stop)\r\n");
+        usb_cdc_print("  CH1->Steering  CH2->Aux  CH3->Throttle  CH4->Ebrake\r\n\r\n");
+        
+        while (usb_cdc_available() == 0) {
+            crsf_process();
+            
+            const crsf_state_t *crsf = crsf_get_state();
+            
+            if (!crsf->failsafe) {
+                /* Map CRSF channels to PWM outputs */
+                /* AETR: CH0=Ail(steering), CH1=Ele, CH2=Thr, CH3=Rud */
+                pwm_set_crsf(PWM_STEERING, crsf->channels[0]);  /* CH1 -> Steering */
+                pwm_set_crsf(PWM_AUX,      crsf->channels[1]);  /* CH2 -> Aux */
+                pwm_set_crsf(PWM_THROTTLE, crsf->channels[2]);  /* CH3 -> Throttle */
+                pwm_set_crsf(PWM_EBRAKE,   crsf->channels[3]);  /* CH4 -> E-brake */
+            }
+            
+            /* Display current state */
+            usb_cdc_print("\rSteer:");
+            print_int(pwm_get_pulse(PWM_STEERING));
+            usb_cdc_print(" Thr:");
+            print_int(pwm_get_pulse(PWM_THROTTLE));
+            usb_cdc_print(" Brk:");
+            print_int(pwm_get_pulse(PWM_EBRAKE));
+            usb_cdc_print(" Aux:");
+            print_int(pwm_get_pulse(PWM_AUX));
+            
+            if (crsf->failsafe) {
+                usb_cdc_print(" [FAILSAFE]");
+            }
+            usb_cdc_print("     ");
+            
+            target_delay_ms(20);  /* ~50Hz update */
+        }
+        
+        /* Return servos to center on exit */
+        pwm_set_pulse(PWM_STEERING, PWM_PULSE_CENTER);
+        pwm_set_pulse(PWM_THROTTLE, PWM_PULSE_CENTER);
+        pwm_set_pulse(PWM_EBRAKE, PWM_PULSE_CENTER);
+        pwm_set_pulse(PWM_AUX, PWM_PULSE_CENTER);
+        
+        usb_cdc_read_byte();
+        usb_cdc_print("\r\nPassthrough stopped, servos centered.\r\n");
+    }
     else if (strcmp(line, "dfu") == 0) {
         usb_cdc_print("Rebooting to DFU bootloader...\r\n");
         target_delay_ms(100);  /* Let USB send */
@@ -419,6 +513,9 @@ void drivers_init(void)
     
     /* Initialize CRSF receiver */
     crsf_ok = crsf_init();
+    
+    /* Initialize PWM outputs */
+    pwm_ok = pwm_init();
 }
 
 void flight_init(void)

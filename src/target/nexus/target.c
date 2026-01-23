@@ -14,9 +14,6 @@ uint32_t SystemCoreClock = 16000000U;  /* Updated by clock config */
 
 static volatile uint32_t systick_ms = 0;
 
-/* APB prescaler table - needed by HAL_RCC_GetPCLKx for UART baud rate calculation */
-const uint8_t APBPrescTable[8] = {0, 0, 0, 0, 1, 2, 3, 4};
-
 /* ============================================================================
  * System Initialization (called from startup)
  * ============================================================================ */
