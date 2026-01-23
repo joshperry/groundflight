@@ -134,7 +134,7 @@ int main(void)
             } else {
                 usb_cdc_print("NOT INITIALIZED\r\n");
             }
-            usb_cdc_print("Mode: Passthrough active (CRSF->PWM)\r\n");
+            usb_cdc_print("Mode: Passthrough (CH1->Steer, CH3->Motor, CH4->Brake)\r\n");
             usb_cdc_print("\r\n> ");
             sent_banner = true;
         }
@@ -161,17 +161,15 @@ int main(void)
             
             if (!crsf->failsafe) {
                 /* Map CRSF channels to PWM outputs */
-                /* AETR: CH0=Ail(steering), CH1=Ele(aux), CH2=Thr, CH3=Rud(ebrake) */
-                pwm_set_crsf(PWM_STEERING, crsf->channels[0]);
-                pwm_set_crsf(PWM_AUX,      crsf->channels[1]);
-                pwm_set_crsf(PWM_THROTTLE, crsf->channels[2]);
-                pwm_set_crsf(PWM_EBRAKE,   crsf->channels[3]);
+                /* CH1=Steering, CH3=Throttle, CH4=E-brake */
+                pwm_set_crsf(PWM_STEERING, crsf->channels[0]);  /* S1 */
+                pwm_set_crsf(PWM_EBRAKE,   crsf->channels[3]);  /* S3 */
+                pwm_set_crsf(PWM_MOTOR,    crsf->channels[2]);  /* ESC header */
             } else {
-                /* Failsafe: center steering, stop throttle */
+                /* Failsafe: center steering, stop motor */
                 pwm_set_pulse(PWM_STEERING, PWM_PULSE_CENTER);
-                pwm_set_pulse(PWM_THROTTLE, PWM_PULSE_CENTER);
                 pwm_set_pulse(PWM_EBRAKE,   PWM_PULSE_CENTER);
-                pwm_set_pulse(PWM_AUX,      PWM_PULSE_CENTER);
+                pwm_set_pulse(PWM_MOTOR,    PWM_PULSE_MIN);  /* Motor off */
             }
         }
     }
@@ -453,7 +451,7 @@ static void cli_process_line(const char *line)
             return;
         }
         usb_cdc_print("Passthrough monitor (always active, any key to exit):\r\n");
-        usb_cdc_print("  CH1->Steering  CH2->Aux  CH3->Throttle  CH4->Ebrake\r\n\r\n");
+        usb_cdc_print("  CH1->Steering(S1)  CH3->Motor(ESC)  CH4->Ebrake(S3)\r\n\r\n");
         
         while (usb_cdc_available() == 0) {
             crsf_process();
@@ -463,20 +461,17 @@ static void cli_process_line(const char *line)
             /* Update PWM (same as main loop) */
             if (!crsf->failsafe) {
                 pwm_set_crsf(PWM_STEERING, crsf->channels[0]);
-                pwm_set_crsf(PWM_AUX,      crsf->channels[1]);
-                pwm_set_crsf(PWM_THROTTLE, crsf->channels[2]);
                 pwm_set_crsf(PWM_EBRAKE,   crsf->channels[3]);
+                pwm_set_crsf(PWM_MOTOR,    crsf->channels[2]);
             }
             
             /* Display current state */
             usb_cdc_print("\rSteer:");
             print_int(pwm_get_pulse(PWM_STEERING));
-            usb_cdc_print(" Thr:");
-            print_int(pwm_get_pulse(PWM_THROTTLE));
-            usb_cdc_print(" Brk:");
+            usb_cdc_print(" Motor:");
+            print_int(pwm_get_pulse(PWM_MOTOR));
+            usb_cdc_print(" Brake:");
             print_int(pwm_get_pulse(PWM_EBRAKE));
-            usb_cdc_print(" Aux:");
-            print_int(pwm_get_pulse(PWM_AUX));
             
             if (crsf->failsafe) {
                 usb_cdc_print(" [FAILSAFE]");
