@@ -1,0 +1,25 @@
+# Build outputs
+build/
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.d
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*~
+
+# Nix
+result
+result-*
+.direnv/
+
+# STM32CubeF7 (only needed for non-Nix builds)
+lib/STM32CubeF7/
+
+# Local config overrides
+*.local
