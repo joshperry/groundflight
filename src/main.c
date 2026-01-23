@@ -134,6 +134,7 @@ int main(void)
             } else {
                 usb_cdc_print("NOT INITIALIZED\r\n");
             }
+            usb_cdc_print("Mode: Passthrough active (CRSF->PWM)\r\n");
             usb_cdc_print("\r\n> ");
             sent_banner = true;
         }
@@ -154,15 +155,25 @@ int main(void)
             last_blink = now;
         }
         
-        /* TODO: Add main loop processing
-         * 
-         * Target loop structure (1kHz):
-         *   1. Read CRSF channels
-         *   2. Read IMU gyro data
-         *   3. Update ESC telemetry
-         *   4. Run stabilizer algorithm
-         *   5. Output to servos
-         */
+        /* Passthrough: CRSF -> PWM (always active) */
+        if (crsf_ok && pwm_ok) {
+            const crsf_state_t *crsf = crsf_get_state();
+            
+            if (!crsf->failsafe) {
+                /* Map CRSF channels to PWM outputs */
+                /* AETR: CH0=Ail(steering), CH1=Ele(aux), CH2=Thr, CH3=Rud(ebrake) */
+                pwm_set_crsf(PWM_STEERING, crsf->channels[0]);
+                pwm_set_crsf(PWM_AUX,      crsf->channels[1]);
+                pwm_set_crsf(PWM_THROTTLE, crsf->channels[2]);
+                pwm_set_crsf(PWM_EBRAKE,   crsf->channels[3]);
+            } else {
+                /* Failsafe: center steering, stop throttle */
+                pwm_set_pulse(PWM_STEERING, PWM_PULSE_CENTER);
+                pwm_set_pulse(PWM_THROTTLE, PWM_PULSE_CENTER);
+                pwm_set_pulse(PWM_EBRAKE,   PWM_PULSE_CENTER);
+                pwm_set_pulse(PWM_AUX,      PWM_PULSE_CENTER);
+            }
+        }
     }
     
     return 0;
@@ -222,7 +233,7 @@ static void cli_process_line(const char *line)
         usb_cdc_print("  cal       - Calibrate gyro (keep device still!)\r\n");
         usb_cdc_print("  crsf      - Show live CRSF channel data\r\n");
         usb_cdc_print("  servo N P - Set servo N (0-4) to pulse P (1000-2000)\r\n");
-        usb_cdc_print("  pass      - Passthrough mode: CRSF -> servos (any key to stop)\r\n");
+        usb_cdc_print("  pass      - Monitor passthrough (always active)\r\n");
         usb_cdc_print("  dfu       - Reboot to DFU bootloader\r\n");
         usb_cdc_print("  reboot    - Reboot system\r\n");
     }
@@ -441,7 +452,7 @@ static void cli_process_line(const char *line)
             usb_cdc_print("Error: CRSF and PWM must be initialized\r\n");
             return;
         }
-        usb_cdc_print("Passthrough mode: CRSF -> Servos (any key to stop)\r\n");
+        usb_cdc_print("Passthrough monitor (always active, any key to exit):\r\n");
         usb_cdc_print("  CH1->Steering  CH2->Aux  CH3->Throttle  CH4->Ebrake\r\n\r\n");
         
         while (usb_cdc_available() == 0) {
@@ -449,13 +460,12 @@ static void cli_process_line(const char *line)
             
             const crsf_state_t *crsf = crsf_get_state();
             
+            /* Update PWM (same as main loop) */
             if (!crsf->failsafe) {
-                /* Map CRSF channels to PWM outputs */
-                /* AETR: CH0=Ail(steering), CH1=Ele, CH2=Thr, CH3=Rud */
-                pwm_set_crsf(PWM_STEERING, crsf->channels[0]);  /* CH1 -> Steering */
-                pwm_set_crsf(PWM_AUX,      crsf->channels[1]);  /* CH2 -> Aux */
-                pwm_set_crsf(PWM_THROTTLE, crsf->channels[2]);  /* CH3 -> Throttle */
-                pwm_set_crsf(PWM_EBRAKE,   crsf->channels[3]);  /* CH4 -> E-brake */
+                pwm_set_crsf(PWM_STEERING, crsf->channels[0]);
+                pwm_set_crsf(PWM_AUX,      crsf->channels[1]);
+                pwm_set_crsf(PWM_THROTTLE, crsf->channels[2]);
+                pwm_set_crsf(PWM_EBRAKE,   crsf->channels[3]);
             }
             
             /* Display current state */
@@ -470,20 +480,18 @@ static void cli_process_line(const char *line)
             
             if (crsf->failsafe) {
                 usb_cdc_print(" [FAILSAFE]");
+            } else {
+                usb_cdc_print(" LQ=");
+                print_int(crsf->link.uplink_link_quality);
+                usb_cdc_print("%");
             }
             usb_cdc_print("     ");
             
-            target_delay_ms(20);  /* ~50Hz update */
+            target_delay_ms(50);
         }
         
-        /* Return servos to center on exit */
-        pwm_set_pulse(PWM_STEERING, PWM_PULSE_CENTER);
-        pwm_set_pulse(PWM_THROTTLE, PWM_PULSE_CENTER);
-        pwm_set_pulse(PWM_EBRAKE, PWM_PULSE_CENTER);
-        pwm_set_pulse(PWM_AUX, PWM_PULSE_CENTER);
-        
         usb_cdc_read_byte();
-        usb_cdc_print("\r\nPassthrough stopped, servos centered.\r\n");
+        usb_cdc_print("\r\n");
     }
     else if (strcmp(line, "dfu") == 0) {
         usb_cdc_print("Rebooting to DFU bootloader...\r\n");
