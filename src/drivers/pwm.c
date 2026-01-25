@@ -177,7 +177,7 @@ static bool tim4_init(void)
     
     /* Configure PWM channel */
     sConfigOC.OCMode = TIM_OCMODE_PWM1;
-    sConfigOC.Pulse = PWM_PULSE_MIN;  /* Motor starts at minimum (stopped) */
+    sConfigOC.Pulse = PWM_PULSE_CENTER;  /* Neutral */
     sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
     sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
     
@@ -197,12 +197,12 @@ static bool tim4_init(void)
 
 bool pwm_init(void)
 {
-    /* Initialize all pulse values to safe defaults */
+    /* Initialize all pulse values to safe defaults (center = neutral) */
     pulse_values[PWM_STEERING] = PWM_PULSE_CENTER;
     pulse_values[PWM_THROTTLE] = PWM_PULSE_CENTER;
     pulse_values[PWM_EBRAKE]   = PWM_PULSE_CENTER;
     pulse_values[PWM_AUX]      = PWM_PULSE_CENTER;
-    pulse_values[PWM_MOTOR]    = PWM_PULSE_MIN;  /* Motor off */
+    pulse_values[PWM_MOTOR]    = PWM_PULSE_CENTER;  /* Neutral, not min */
     
     /* Initialize timers */
     if (!tim3_init()) return false;

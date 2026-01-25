@@ -34,6 +34,17 @@ static bool crsf_ok = false;
 /* PWM state */
 static bool pwm_ok = false;
 
+/* Arm state */
+static bool armed = false;
+
+/* Arm channel configuration */
+#define ARM_CHANNEL         4       /* CH5 (0-indexed) */
+#define ARM_THRESHOLD_HIGH  1700    /* Above this = arm requested */
+#define ARM_THRESHOLD_LOW   1300    /* Below this = disarm requested */
+#define THROTTLE_CHANNEL    2       /* CH3 (0-indexed) */
+#define THROTTLE_NEUTRAL_MIN 1400   /* Throttle must be in this range to arm */
+#define THROTTLE_NEUTRAL_MAX 1600
+
 /* Simple printf helper for integers */
 static void print_int(int32_t val)
 {
@@ -134,7 +145,7 @@ int main(void)
             } else {
                 usb_cdc_print("NOT INITIALIZED\r\n");
             }
-            usb_cdc_print("Mode: Passthrough (CH1->Steer, CH3->Motor, CH4->Brake)\r\n");
+            usb_cdc_print("Mode: Passthrough (CH5->Arm, CH1->Steer, CH3->Motor, CH4->Brake)\r\n");
             usb_cdc_print("\r\n> ");
             sent_banner = true;
         }
@@ -155,21 +166,38 @@ int main(void)
             last_blink = now;
         }
         
-        /* Passthrough: CRSF -> PWM (always active) */
+        /* Arm/Disarm logic */
         if (crsf_ok && pwm_ok) {
             const crsf_state_t *crsf = crsf_get_state();
             
-            if (!crsf->failsafe) {
-                /* Map CRSF channels to PWM outputs */
-                /* CH1=Steering, CH3=Throttle, CH4=E-brake */
-                pwm_set_crsf(PWM_STEERING, crsf->channels[0]);  /* S1 */
-                pwm_set_crsf(PWM_EBRAKE,   crsf->channels[3]);  /* S3 */
-                pwm_set_crsf(PWM_MOTOR,    crsf->channels[2]);  /* ESC header */
+            /* Disarm conditions (checked first, always apply) */
+            if (crsf->failsafe) {
+                armed = false;  /* Signal loss = disarm */
             } else {
-                /* Failsafe: center steering, stop motor */
+                uint16_t arm_ch = crsf_to_us(crsf->channels[ARM_CHANNEL]);
+                uint16_t throttle_ch = crsf_to_us(crsf->channels[THROTTLE_CHANNEL]);
+                
+                if (arm_ch < ARM_THRESHOLD_LOW) {
+                    armed = false;  /* Switch low = disarm */
+                } else if (!armed && arm_ch > ARM_THRESHOLD_HIGH) {
+                    /* Arm only if throttle neutral */
+                    if (throttle_ch >= THROTTLE_NEUTRAL_MIN && 
+                        throttle_ch <= THROTTLE_NEUTRAL_MAX) {
+                        armed = true;
+                    }
+                }
+            }
+            
+            /* Output logic - single code path */
+            if (armed) {
+                pwm_set_crsf(PWM_STEERING, crsf->channels[0]);
+                pwm_set_crsf(PWM_EBRAKE,   crsf->channels[3]);
+                pwm_set_crsf(PWM_MOTOR,    crsf->channels[2]);
+            } else {
+                /* Disarmed = failsafe = outputs neutral */
                 pwm_set_pulse(PWM_STEERING, PWM_PULSE_CENTER);
                 pwm_set_pulse(PWM_EBRAKE,   PWM_PULSE_CENTER);
-                pwm_set_pulse(PWM_MOTOR,    PWM_PULSE_MIN);  /* Motor off */
+                pwm_set_pulse(PWM_MOTOR,    PWM_PULSE_CENTER);
             }
         }
     }
@@ -231,7 +259,7 @@ static void cli_process_line(const char *line)
         usb_cdc_print("  cal       - Calibrate gyro (keep device still!)\r\n");
         usb_cdc_print("  crsf      - Show live CRSF channel data\r\n");
         usb_cdc_print("  servo N P - Set servo N (0-4) to pulse P (1000-2000)\r\n");
-        usb_cdc_print("  pass      - Monitor passthrough (always active)\r\n");
+        usb_cdc_print("  pass      - Monitor passthrough and arm state\r\n");
         usb_cdc_print("  dfu       - Reboot to DFU bootloader\r\n");
         usb_cdc_print("  reboot    - Reboot system\r\n");
     }
@@ -277,6 +305,13 @@ static void cli_process_line(const char *line)
         }
         
         usb_cdc_print("  ESC:      Not initialized\r\n");
+        
+        usb_cdc_print("  Armed:    ");
+        if (armed) {
+            usb_cdc_print("YES\r\n");
+        } else {
+            usb_cdc_print("NO (flip CH5 with throttle neutral to arm)\r\n");
+        }
         
         usb_cdc_print("  Clock:    ");
         extern uint32_t SystemCoreClock;
@@ -450,37 +485,58 @@ static void cli_process_line(const char *line)
             usb_cdc_print("Error: CRSF and PWM must be initialized\r\n");
             return;
         }
-        usb_cdc_print("Passthrough monitor (always active, any key to exit):\r\n");
-        usb_cdc_print("  CH1->Steering(S1)  CH3->Motor(ESC)  CH4->Ebrake(S3)\r\n\r\n");
+        usb_cdc_print("Passthrough monitor (any key to exit):\r\n");
+        usb_cdc_print("  CH5=Arm  CH1->Steering  CH3->Motor  CH4->Ebrake\r\n\r\n");
         
         while (usb_cdc_available() == 0) {
             crsf_process();
             
             const crsf_state_t *crsf = crsf_get_state();
             
-            /* Update PWM (same as main loop) */
-            if (!crsf->failsafe) {
+            /* Arm/disarm logic (same as main loop) */
+            if (crsf->failsafe) {
+                armed = false;
+            } else {
+                uint16_t arm_ch = crsf_to_us(crsf->channels[ARM_CHANNEL]);
+                uint16_t throttle_ch = crsf_to_us(crsf->channels[THROTTLE_CHANNEL]);
+                
+                if (arm_ch < ARM_THRESHOLD_LOW) {
+                    armed = false;
+                } else if (!armed && arm_ch > ARM_THRESHOLD_HIGH) {
+                    if (throttle_ch >= THROTTLE_NEUTRAL_MIN && 
+                        throttle_ch <= THROTTLE_NEUTRAL_MAX) {
+                        armed = true;
+                    }
+                }
+            }
+            
+            /* Output logic */
+            if (armed) {
                 pwm_set_crsf(PWM_STEERING, crsf->channels[0]);
                 pwm_set_crsf(PWM_EBRAKE,   crsf->channels[3]);
                 pwm_set_crsf(PWM_MOTOR,    crsf->channels[2]);
+            } else {
+                pwm_set_pulse(PWM_STEERING, PWM_PULSE_CENTER);
+                pwm_set_pulse(PWM_EBRAKE,   PWM_PULSE_CENTER);
+                pwm_set_pulse(PWM_MOTOR,    PWM_PULSE_CENTER);
             }
             
             /* Display current state */
-            usb_cdc_print("\rSteer:");
+            usb_cdc_print("\r");
+            if (armed) {
+                usb_cdc_print("[ARMED]   ");
+            } else {
+                usb_cdc_print("[DISARMED]");
+            }
+            usb_cdc_print(" Steer:");
             print_int(pwm_get_pulse(PWM_STEERING));
             usb_cdc_print(" Motor:");
             print_int(pwm_get_pulse(PWM_MOTOR));
             usb_cdc_print(" Brake:");
             print_int(pwm_get_pulse(PWM_EBRAKE));
-            
-            if (crsf->failsafe) {
-                usb_cdc_print(" [FAILSAFE]");
-            } else {
-                usb_cdc_print(" LQ=");
-                print_int(crsf->link.uplink_link_quality);
-                usb_cdc_print("%");
-            }
-            usb_cdc_print("     ");
+            usb_cdc_print(" LQ=");
+            print_int(crsf->link.uplink_link_quality);
+            usb_cdc_print("%    ");
             
             target_delay_ms(50);
         }

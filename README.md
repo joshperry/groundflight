@@ -2,7 +2,7 @@
 
 RC car yaw stabilization firmware for the RadioMaster Nexus flight controller.
 
-**Status:** Passthrough working — Blink ✅ | USB CLI ✅ | IMU ✅ | CRSF ✅ | PWM ✅ | Stabilizer 🔲
+**Status:** Passthrough with ARM — Blink ✅ | USB CLI ✅ | IMU ✅ | CRSF ✅ | PWM ✅ | ARM ✅ | Stabilizer 🔲
 
 ## What is this?
 
@@ -21,7 +21,7 @@ The core idea: use the same control algorithms that keep helicopter tail rotors 
 | Flash | W25N01G (128MB, for blackbox logging) |
 | Receiver | CRSF/ELRS via UART4 (420kbaud) |
 | ESC Telemetry | SRXL2 via UART3 (for RPM-based speed estimation) |
-| Outputs | 5x PWM (steering, throttle, e-brake, aux, motor) |
+| Outputs | 5x PWM (steering, e-brake, aux on servo headers; motor on ESC header) |
 | CLI | USB CDC (Virtual COM port) |
 
 ### Pin Mapping
@@ -53,7 +53,7 @@ SPI2 (Flash - W25N01G):
   PB14 = MISO
   PB15 = MOSI
 
-UART3 (ESC Telemetry):
+UART3 (ESC Telemetry - SRXL2):
   PB10 = RX
   PB11 = TX
 
@@ -68,20 +68,24 @@ UART6 (Spare):
   PC7 = TX
 
 PWM Outputs (50Hz, 1µs resolution):
-  PB4 = TIM3_CH1 - Servo 1 (Steering)
-  PB5 = TIM3_CH2 - Servo 2 (Throttle)
-  PB0 = TIM3_CH3 - Servo 3 (E-brake)
-  PB3 = TIM2_CH2 - Servo 4 (Aux)
-  PB6 = TIM4_CH1 - Motor 1 (ESC)
+  PB4 = TIM3_CH1 - S1 (Steering)
+  PB5 = TIM3_CH2 - S2 (unused)
+  PB0 = TIM3_CH3 - S3 (E-brake)
+  PB3 = TIM2_CH2 - S4 (Aux)
+  PB6 = TIM4_CH1 - ESC Header (Motor/Throttle)
 ```
 
-### Nexus Port Pinout
+### Nexus Connector Pinout
 
 **Port A (UART4 - CRSF):** Connect ELRS receiver here
 - Pin 1: GND
 - Pin 2: 5V
 - Pin 3: RX (to receiver TX)
 - Pin 4: TX (to receiver RX, for telemetry)
+
+**ESC Header:** Connect ESC signal wire here (throttle output)
+
+**S1/S2/S3 Servo Headers:** Connect steering servo to S1, e-brake to S3
 
 ## Quick Start
 
@@ -131,6 +135,17 @@ $ gf-dfu                 # Flash the binary
 gf-monitor   # USB serial monitor (Ctrl-C to exit)
 ```
 
+## Channel Mapping
+
+| CRSF Channel | Function | Output |
+|--------------|----------|--------|
+| CH1 (Aileron) | Steering | S1 (PB4) |
+| CH3 (Throttle) | Motor/ESC | ESC Header (PB6) |
+| CH4 (Rudder) | E-brake servo | S3 (PB0) |
+| CH5 (Aux1) | **ARM switch** | — |
+
+**ARM is required for outputs to respond.** See Operating Modes below.
+
 ## CLI Commands
 
 ```
@@ -144,7 +159,7 @@ Commands:
   cal       - Calibrate gyro (keep device still!)
   crsf      - Show live CRSF channel data
   servo N P - Set servo N (0-4) to pulse P (1000-2000)
-  pass      - Monitor passthrough (always active)
+  pass      - Monitor passthrough and arm state
   dfu       - Reboot to DFU bootloader
   reboot    - Reboot system
 ```
@@ -158,31 +173,43 @@ GroundFlight Status:
   CRSF:     Connected (1234 frames, 0 errors)
   Link:     RSSI=-65dBm LQ=100%
   ESC:      Not initialized
+  Armed:    NO (flip CH5 with throttle neutral to arm)
   Clock:    216 MHz
   Uptime:   12345 ms
 
-> crsf
-Live CRSF data (any key to stop):
-CH:  1     2     3     4     5     6     7     8
-     992  992  1500   992   172  1811   992   992  LQ=100%
+> pass
+Passthrough monitor (any key to exit):
+  CH5=Arm  CH1->Steering  CH3->Motor  CH4->Ebrake
 
-> cal
-Calibrating gyro - keep device still...
-Calibration complete.
-Bias: X=-0.12 Y=0.08 Z=-0.03 dps
+[DISARMED] Steer:1500 Motor:1500 Brake:1500 LQ=100%
+[ARMED]    Steer:1523 Motor:1500 Brake:1500 LQ=100%
 ```
 
 ## Operating Modes
 
-### Passthrough Mode (Current Default)
+### ARM Safety Interlock
 
-CRSF channels map directly to PWM outputs:
-- CH1 (Aileron) → Steering servo
-- CH2 (Elevator) → Aux servo
-- CH3 (Throttle) → Throttle/ESC
-- CH4 (Rudder) → E-brake servo
+The car will not respond to controls until armed. This prevents:
+- Runaway on power-up
+- Unexpected movement if transmitter is bumped
+- Movement during signal loss
 
-Failsafe: All servos center on signal loss.
+**To ARM:**
+1. Throttle must be at neutral (1400-1600µs)
+2. Flip CH5 switch high (>1700µs)
+
+**To DISARM (any of these):**
+- Flip CH5 switch low (<1300µs)
+- Signal loss (CRSF failsafe)
+
+**When disarmed:** All outputs locked to neutral (1500µs). This IS the failsafe state — there's no separate failsafe behavior.
+
+### Passthrough Mode (Current)
+
+When armed, CRSF channels map directly to PWM outputs:
+- CH1 → Steering servo (S1)
+- CH3 → Motor ESC (ESC header)
+- CH4 → E-brake servo (S3)
 
 ### Stabilized Mode (Coming Soon)
 
@@ -196,45 +223,67 @@ steering_out = steering_in + (gyro_yaw * gain)
 | # | Milestone | Status | Notes |
 |---|-----------|--------|-------|
 | 1 | Blink | ✅ | PC14 LED, active low |
-| 2 | USB CDC CLI | ✅ | Virtual COM port, no UART needed |
+| 2 | USB CDC CLI | ✅ | Virtual COM port |
 | 3 | IMU | ✅ | ICM-42688-P, ±2000°/s @ 1kHz |
-| 4 | CRSF | ✅ | 420kbaud, interrupt-driven, 0 CRC errors |
+| 4 | CRSF | ✅ | 420kbaud, interrupt-driven |
 | 5 | PWM | ✅ | TIM2/3/4, 50Hz, 1µs resolution |
-| 6 | E-brake | ✅ | Passthrough on CH4 |
-| 7 | ESC throttle | ✅ | Passthrough on CH3 |
-| 8 | **Stabilizer** | 🔲 | P controller on yaw rate |
-| 9 | Brake-aware | 🔲 | Reduce gain during braking |
-| 10 | Tuning | 🔲 | Gain knob via aux channel, CLI params |
-| 11 | Config save | 🔲 | Persist to flash |
-| 12 | ESC telemetry | 🔲 | SRXL2 for speed-from-RPM |
+| 6 | E-brake passthrough | ✅ | CH4 → S3 |
+| 7 | ESC throttle | ✅ | CH3 → ESC header |
+| 8 | ARM interlock | ✅ | CH5, throttle-neutral-to-arm |
+| 9 | **Stabilizer** | 🔲 | P controller on yaw rate |
+| 10 | Brake-aware | 🔲 | Reduce gain during braking |
+| 11 | Tuning | 🔲 | Gain knob via aux channel, CLI params |
+| 12 | Config save | 🔲 | Persist to flash |
+| 13 | ESC telemetry | 🔲 | SRXL2 for speed-from-RPM |
+| 14 | MSP protocol | 🔲 | DVR arm signal, OSD |
+| 15 | HIL testing | 🔲 | Automated safety regression |
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  CRSF RX    │────▶│   Mixer     │────▶│  PWM Out    │
-│  (steering, │     │             │     │  (servos)   │
-│   throttle) │     └──────┬──────┘     └─────────────┘
-└─────────────┘            │
-                           │ correction
-                    ┌──────┴──────┐
-                    │ Stabilizer  │◀──── Gyro Z (yaw rate)
-                    │  (PI/PID)   │
-                    └──────┬──────┘
-                           │
-                    ┌──────┴──────┐
-                    │ Speed Est.  │◀──── ESC telemetry (RPM)
-                    │ (gain sched)│
-                    └─────────────┘
+                              ┌─────────────┐
+                              │  ARM Check  │◀──── CH5 switch
+                              └──────┬──────┘
+                                     │ armed?
+        ┌─────────────┐              ▼
+        │  CRSF RX    │────▶ ┌─────────────┐     ┌─────────────┐
+        │  (channels) │      │   Mixer     │────▶│  PWM Out    │
+        └─────────────┘      │             │     │  (servos)   │
+                             └──────┬──────┘     └─────────────┘
+                                    │
+                                    │ correction (when stabilizer enabled)
+                             ┌──────┴──────┐
+                             │ Stabilizer  │◀──── Gyro Z (yaw rate)
+                             │  (PI/PID)   │
+                             └──────┬──────┘
+                                    │
+                             ┌──────┴──────┐
+                             │ Speed Est.  │◀──── ESC telemetry (RPM)
+                             │ (gain sched)│
+                             └─────────────┘
 ```
 
-The stabilizer applies yaw correction to steering based on gyro rate. At higher speeds (from ESC telemetry), correction gain is reduced to prevent overcorrection.
+The stabilizer will apply yaw correction to steering based on gyro rate. At higher speeds (from ESC telemetry), correction gain is reduced to prevent overcorrection.
+
+## Safety
+
+See [TESTING.md](TESTING.md) for the full testing strategy.
+
+**Key safety properties:**
+- Outputs are neutral (1500µs) until explicitly armed
+- Disarm is immediate and unconditional
+- Signal loss = automatic disarm
+- ARM requires throttle at neutral (prevents arming while throttle is up)
+
+**Learned the hard way:** Car ESCs use 1500µs as neutral, not 1000µs. An early bug set failsafe to 1000µs (full reverse). This is why we need hardware-in-loop testing — you can't unit test your assumptions.
 
 ## Tested Hardware
 
 - **Flight Controller:** RadioMaster Nexus
 - **Receiver:** RadioMaster RP3-H (ELRS 2.4GHz)
 - **Transmitter:** Jumper T-20 (ELRS), RadioMaster TX16S
+- **ESC:** Spektrum Firma 150A Smart ESC
+- **Vehicle:** Arrma Infraction 6S
 - **Also compatible:** Any ELRS receiver with CRSF output
 
 ## Project Structure
@@ -243,6 +292,7 @@ The stabilizer applies yaw correction to steering based on gyro rate. At higher 
 groundflight/
 ├── flake.nix              # Nix dev environment & STM32CubeF7
 ├── CMakeLists.txt         # Build configuration
+├── TESTING.md             # Test strategy documentation
 ├── cmake/
 │   └── arm-none-eabi.cmake
 ├── linker/
@@ -252,7 +302,7 @@ groundflight/
 ├── lib/
 │   └── stubs/             # Minimal stubs for non-Nix builds
 └── src/
-    ├── main.c             # Main loop, CLI commands
+    ├── main.c             # Main loop, CLI, ARM logic
     ├── stm32f7xx_hal_conf.h
     ├── drivers/
     │   ├── icm42688.c/h   # IMU driver
@@ -300,6 +350,15 @@ APB1 timer clock = 108MHz. For 50Hz servo PWM with 1µs resolution:
 - Prescaler = 107 (108MHz / 108 = 1MHz)
 - Period = 19999 (20ms = 50Hz)
 - CCR = pulse width in microseconds
+
+### Car ESC Neutral
+
+**Important:** Car ESCs use 1500µs as neutral (stopped), not 1000µs.
+- 1000µs = full reverse (or full brake, depending on ESC mode)
+- 1500µs = stopped
+- 2000µs = full forward
+
+All safe/failsafe/disarmed states must output 1500µs to the ESC.
 
 ### HAL Dependencies
 
