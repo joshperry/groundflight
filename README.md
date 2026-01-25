@@ -12,7 +12,7 @@ The core idea: use the same control algorithms that keep helicopter tail rotors 
 
 ## Hardware
 
-**Target:** [RadioMaster Nexus](https://www.radiomasterrc.com/products/nexus-flybarless-controller) FBL Controller
+**Target:** [RadioMaster Nexus (discontinued)](https://www.rotorflight.org/docs/controllers/rm-nexus) FBL Controller
 
 | Component | Spec |
 |-----------|------|
