@@ -86,4 +86,12 @@ uint16_t pwm_get_pulse(pwm_channel_t channel);
  */
 void pwm_enable(pwm_channel_t channel, bool enabled);
 
+/**
+ * Reinitialize motor PWM channel
+ * 
+ * Call this after switching from SRXL2 mode back to PWM mode.
+ * Reconfigures PB6 GPIO for TIM4 output.
+ */
+void pwm_motor_init(void);
+
 #endif /* PWM_H */

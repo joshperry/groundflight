@@ -10,6 +10,7 @@
 #include "icm42688.h"
 #include "crsf.h"
 #include "pwm.h"
+#include "esc.h"
 #include <string.h>
 
 /* Forward declarations for driver stubs */
@@ -34,8 +35,13 @@ static bool crsf_ok = false;
 /* PWM state */
 static bool pwm_ok = false;
 
+/* ESC state */
+static bool esc_ok = false;
+
 /* Arm state */
 static bool armed = false;
+
+static bool motor_test_mode = false;
 
 /* Arm channel configuration */
 #define ARM_CHANNEL         4       /* CH5 (0-indexed) */
@@ -145,7 +151,7 @@ int main(void)
             } else {
                 usb_cdc_print("NOT INITIALIZED\r\n");
             }
-            usb_cdc_print("Mode: Passthrough (CH5->Arm, CH1->Steer, CH3->Motor, CH4->Brake)\r\n");
+            usb_cdc_print("Mode: Passthrough (CH5=Arm, CH1->Steer, CH3->Motor, CH4->Brake)\r\n");
             usb_cdc_print("\r\n> ");
             sent_banner = true;
         }
@@ -192,13 +198,20 @@ int main(void)
             if (armed) {
                 pwm_set_crsf(PWM_STEERING, crsf->channels[0]);
                 pwm_set_crsf(PWM_EBRAKE,   crsf->channels[3]);
-                pwm_set_crsf(PWM_MOTOR,    crsf->channels[2]);
+                esc_set_throttle_crsf(crsf->channels[2]);  /* ESC driver handles mode */
             } else {
                 /* Disarmed = failsafe = outputs neutral */
                 pwm_set_pulse(PWM_STEERING, PWM_PULSE_CENTER);
                 pwm_set_pulse(PWM_EBRAKE,   PWM_PULSE_CENTER);
-                pwm_set_pulse(PWM_MOTOR,    PWM_PULSE_CENTER);
+                if(!motor_test_mode) {
+                    esc_set_throttle(ESC_THROTTLE_CENTER);
+                }
             }
+        }
+        
+        /* Process ESC telemetry (for SRXL2 mode) */
+        if (esc_ok) {
+            esc_process();
         }
     }
     
@@ -260,6 +273,9 @@ static void cli_process_line(const char *line)
         usb_cdc_print("  crsf      - Show live CRSF channel data\r\n");
         usb_cdc_print("  servo N P - Set servo N (0-4) to pulse P (1000-2000)\r\n");
         usb_cdc_print("  pass      - Monitor passthrough and arm state\r\n");
+        usb_cdc_print("  esc       - Show ESC status and telemetry\r\n");
+        usb_cdc_print("  esc pwm   - Switch to PWM mode\r\n");
+        usb_cdc_print("  esc srxl2 - Switch to SRXL2 mode\r\n");
         usb_cdc_print("  dfu       - Reboot to DFU bootloader\r\n");
         usb_cdc_print("  reboot    - Reboot system\r\n");
     }
@@ -304,7 +320,24 @@ static void cli_process_line(const char *line)
             usb_cdc_print("NOT INITIALIZED\r\n");
         }
         
-        usb_cdc_print("  ESC:      Not initialized\r\n");
+        usb_cdc_print("  ESC:      ");
+        if (esc_ok) {
+            if (esc_get_mode() == ESC_MODE_PWM) {
+                usb_cdc_print("PWM mode\r\n");
+            } else {
+                usb_cdc_print("SRXL2 mode");
+                if (esc_telemetry_valid()) {
+                    const esc_telemetry_t *telem = esc_get_telemetry();
+                    usb_cdc_print(" (");
+                    print_int(telem->rpm);
+                    usb_cdc_print(" RPM)\r\n");
+                } else {
+                    usb_cdc_print(" (no telemetry)\r\n");
+                }
+            }
+        } else {
+            usb_cdc_print("NOT INITIALIZED\r\n");
+        }
         
         usb_cdc_print("  Armed:    ");
         if (armed) {
@@ -490,6 +523,7 @@ static void cli_process_line(const char *line)
         
         while (usb_cdc_available() == 0) {
             crsf_process();
+            esc_process();  /* Process ESC telemetry */
             
             const crsf_state_t *crsf = crsf_get_state();
             
@@ -510,15 +544,15 @@ static void cli_process_line(const char *line)
                 }
             }
             
-            /* Output logic */
+            /* Output logic - use ESC driver for motor */
             if (armed) {
                 pwm_set_crsf(PWM_STEERING, crsf->channels[0]);
                 pwm_set_crsf(PWM_EBRAKE,   crsf->channels[3]);
-                pwm_set_crsf(PWM_MOTOR,    crsf->channels[2]);
+                esc_set_throttle_crsf(crsf->channels[2]);
             } else {
                 pwm_set_pulse(PWM_STEERING, PWM_PULSE_CENTER);
                 pwm_set_pulse(PWM_EBRAKE,   PWM_PULSE_CENTER);
-                pwm_set_pulse(PWM_MOTOR,    PWM_PULSE_CENTER);
+                esc_set_throttle(ESC_THROTTLE_CENTER);
             }
             
             /* Display current state */
@@ -543,6 +577,150 @@ static void cli_process_line(const char *line)
         
         usb_cdc_read_byte();
         usb_cdc_print("\r\n");
+    }
+    else if (strcmp(line, "esc") == 0 || strncmp(line, "esc ", 4) == 0) {
+        const char *arg = (strlen(line) > 4) ? line + 4 : NULL;
+        
+        if (arg == NULL) {
+            /* Show ESC status and telemetry */
+            usb_cdc_print("ESC Status:\r\n");
+            usb_cdc_print("  Mode:     ");
+            if (esc_get_mode() == ESC_MODE_PWM) {
+                usb_cdc_print("PWM (no telemetry)\r\n");
+            } else {
+                usb_cdc_print("SRXL2");
+                if (esc_is_connected()) {
+                    usb_cdc_print(" [CONNECTED]\r\n");
+                } else {
+                    usb_cdc_print(" [HANDSHAKING]\r\n");
+                }
+            }
+            
+            if (esc_get_mode() == ESC_MODE_SRXL2) {
+                /* Show ESC device ID and baud info */
+                uint8_t esc_id, esc_baud_cap;
+                uint32_t baud, rehs;
+                esc_get_srxl2_debug(&esc_id, &esc_baud_cap, &baud, &rehs);
+                usb_cdc_print("  ESC ID:   0x");
+                const char hex[] = "0123456789ABCDEF";
+                char h[3] = { hex[(esc_id >> 4) & 0xF], hex[esc_id & 0xF], 0 };
+                usb_cdc_print(h);
+                usb_cdc_print(" (baud cap: 0x");
+                h[0] = hex[(esc_baud_cap >> 4) & 0xF];
+                h[1] = hex[esc_baud_cap & 0xF];
+                usb_cdc_print(h);
+                usb_cdc_print(")\r\n");
+                usb_cdc_print("  Baud:     ");
+                print_int(baud);
+                usb_cdc_print("\r\n");
+                usb_cdc_print("  Re-HS:    ");
+                print_int(rehs);
+                usb_cdc_print("\r\n");
+                
+                /* Show stats */
+                uint32_t tx, rx, crc_err, handshakes;
+                esc_get_srxl2_stats(&tx, &rx, &crc_err, &handshakes);
+                usb_cdc_print("  TX pkts:  ");
+                print_int(tx);
+                usb_cdc_print("\r\n");
+                usb_cdc_print("  RX pkts:  ");
+                print_int(rx);
+                usb_cdc_print("\r\n");
+                usb_cdc_print("  CRC errs: ");
+                print_int(crc_err);
+                usb_cdc_print("\r\n");
+                
+                /* Packet type breakdown */
+                uint32_t pkt_hs, pkt_telem, pkt_ctrl, pkt_other;
+                uint8_t last_type;
+                esc_get_srxl2_pkt_stats(&pkt_hs, &pkt_telem, &pkt_ctrl, &pkt_other, &last_type);
+                usb_cdc_print("  RX breakdown:\r\n");
+                usb_cdc_print("    Handshake: ");
+                print_int(pkt_hs);
+                usb_cdc_print("\r\n");
+                usb_cdc_print("    Telemetry: ");
+                print_int(pkt_telem);
+                usb_cdc_print("\r\n");
+                usb_cdc_print("    Control:   ");
+                print_int(pkt_ctrl);
+                usb_cdc_print("\r\n");
+                usb_cdc_print("    Other:     ");
+                print_int(pkt_other);
+                usb_cdc_print("\r\n");
+                usb_cdc_print("    Last type: 0x");
+                /* Print hex - reuse hex/h from above */
+                h[0] = hex[(last_type >> 4) & 0xF];
+                h[1] = hex[last_type & 0xF];
+                usb_cdc_print(h);
+                usb_cdc_print("\r\n");
+                
+                /* Show telemetry if valid */
+                const esc_telemetry_t *telem = esc_get_telemetry();
+                usb_cdc_print("  Telemetry: ");
+                if (esc_telemetry_valid()) {
+                    usb_cdc_print("Valid\r\n");
+                    usb_cdc_print("  RPM:      ");
+                    print_int(telem->rpm);
+                    usb_cdc_print("\r\n");
+                    usb_cdc_print("  Voltage:  ");
+                    print_float(telem->voltage);
+                    usb_cdc_print(" V\r\n");
+                    usb_cdc_print("  Current:  ");
+                    print_float(telem->current);
+                    usb_cdc_print(" A\r\n");
+                    usb_cdc_print("  Temp:     ");
+                    print_float(telem->temperature);
+                    usb_cdc_print(" C\r\n");
+                } else {
+                    usb_cdc_print("No data\r\n");
+                }
+            }
+        } else if (strcmp(arg, "pwm") == 0) {
+            usb_cdc_print("Switching to PWM mode...\r\n");
+            esc_ok = esc_init(ESC_MODE_PWM);
+            if (esc_ok) {
+                usb_cdc_print("ESC now in PWM mode\r\n");
+            } else {
+                usb_cdc_print("Failed to initialize PWM mode\r\n");
+            }
+        } else if (strcmp(arg, "srxl2") == 0) {
+            usb_cdc_print("Switching to SRXL2 mode...\r\n");
+            esc_ok = esc_init(ESC_MODE_SRXL2);
+            if (esc_ok) {
+                usb_cdc_print("ESC now in SRXL2 mode\r\n");
+                usb_cdc_print("Same ESC header - half-duplex on PB6\r\n");
+            } else {
+                usb_cdc_print("Failed to initialize SRXL2 mode\r\n");
+            }
+        } else {
+            usb_cdc_print("Usage: esc [pwm|srxl2]\r\n");
+        }
+    }
+    else if (strcmp(line, "motor_test") == 0) {
+        motor_test_mode = !motor_test_mode;
+        if (motor_test_mode) {
+            usb_cdc_print("Motor test ENABLED - throttle unlocked\r\n");
+            usb_cdc_print("WARNING: Motors can spin! Use 'motor_test' again to disable\r\n");
+        } else {
+            usb_cdc_print("Motor test DISABLED\r\n");
+            esc_set_throttle(ESC_THROTTLE_CENTER);
+        }
+    }
+    else if (strncmp(line, "throttle ", 9) == 0) {
+        int val = 0;
+        const char *arg = line + 9;
+        while (*arg >= '0' && *arg <= '9') {
+            val = val * 10 + (*arg - '0');
+            arg++;
+        }
+        if (val >= 1000 && val <= 2000) {
+            esc_set_throttle((uint16_t)val);
+            usb_cdc_print("Throttle set to ");
+            print_int(val);
+            usb_cdc_print("us\r\n");
+        } else {
+            usb_cdc_print("Usage: throttle <1000-2000>\r\n");
+        }
     }
     else if (strcmp(line, "dfu") == 0) {
         usb_cdc_print("Rebooting to DFU bootloader...\r\n");
@@ -575,6 +753,9 @@ void drivers_init(void)
     
     /* Initialize PWM outputs */
     pwm_ok = pwm_init();
+    
+    /* Initialize ESC driver (defaults to PWM mode) */
+    esc_ok = esc_init(ESC_MODE_SRXL2);
 }
 
 void flight_init(void)

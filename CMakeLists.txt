@@ -60,9 +60,8 @@ set(SOURCES
     # Drivers
     src/drivers/icm42688.c
     src/drivers/crsf.c
-    src/drivers/esc_telem.c
-    src/drivers/esc_srxl2.c
-    src/drivers/esc_none.c
+    src/drivers/esc.c
+    src/drivers/srxl2.c
     src/drivers/pwm.c
     src/drivers/uart.c
     src/drivers/spi.c

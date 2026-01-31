@@ -319,3 +319,21 @@ void pwm_enable(pwm_channel_t channel, bool enabled)
             break;
     }
 }
+
+void pwm_motor_init(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    
+    /* Reconfigure PB6 for TIM4 (may have been used for USART1) */
+    GPIO_InitStruct.Pin = GPIO_PIN_6;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF2_TIM4;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    
+    /* Set to neutral and start output */
+    pulse_values[PWM_MOTOR] = PWM_PULSE_CENTER;
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, PWM_PULSE_CENTER);
+    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
+}

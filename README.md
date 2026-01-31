@@ -1,14 +1,17 @@
 # GroundFlight
 
-RC car yaw stabilization firmware for the RadioMaster Nexus flight controller.
+GroundFlight repurposes helicopter/drone flight controller hardware for RC car gyro stabilization. Think of it as a "gyro" unit (like Yokomo/Yeah Racing units) but as a full replacement for your RX.
 
-**Status:** Passthrough with ARM — Blink ✅ | USB CLI ✅ | IMU ✅ | CRSF ✅ | PWM ✅ | ARM ✅ | Stabilizer 🔲
+Existing COTS systems for RC car control have already embraced gryo-referened stabilization, if at a somewhat lagged rate to aircraft use of gyros(with the heli guys welcoming them all), but they are all closed hardware and software systems and that's not fun.
 
-## What is this?
+That can be fixed by looking to the open hardware/software space of fixed-wing, helicopter, and quad-rotor. Great software and hardware has grown together in these spaces to create rich systems with sensitivity at the level necessary to direct flight.
 
-GroundFlight repurposes helicopter/drone flight controller hardware for RC car gyro stabilization. Think of it as a "gyro" unit (like Yokomo/Yeah Racing units) but running on more capable hardware with full configurability.
+We're going to start with a really great flight controller in the RadioMaster Nexus, and we'll teach it instead how to do the somewhat simpler land vehicle control and stabilization task.
 
-The core idea: use the same control algorithms that keep helicopter tail rotors locked in place to counteract yaw (oversteer/understeer) in RC cars.
+**Status:** Passthrough with ARM + SRXL2 Telemetry — Blink ✅ | USB CLI ✅ | IMU ✅ | CRSF ✅ | PWM ✅ | ARM ✅ | SRXL2 ✅ | Stabilizer 🔲
+
+**1/24**
+Initial field tests have already progressed successfully, and after a small fix in the failsafe code going into reverse on power loss, we have settled into a stable configuration for the system.
 
 ## Hardware
 
@@ -20,7 +23,7 @@ The core idea: use the same control algorithms that keep helicopter tail rotors 
 | IMU | ICM-42688-P (6-axis, ±2000°/s @ 1kHz) |
 | Flash | W25N01G (128MB, for blackbox logging) |
 | Receiver | CRSF/ELRS via UART4 (420kbaud) |
-| ESC Telemetry | SRXL2 via UART3 (for RPM-based speed estimation) |
+| ESC Telemetry | SRXL2 via USART1 half-duplex on PB6 (shared with ESC header) |
 | Outputs | 5x PWM (steering, e-brake, aux on servo headers; motor on ESC header) |
 | CLI | USB CDC (Virtual COM port) |
 
@@ -53,7 +56,7 @@ SPI2 (Flash - W25N01G):
   PB14 = MISO
   PB15 = MOSI
 
-UART3 (ESC Telemetry - SRXL2):
+UART3 (Spare):
   PB10 = RX
   PB11 = TX
 
@@ -67,12 +70,17 @@ UART6 (Spare):
   PC6 = RX
   PC7 = TX
 
+USART1 (SRXL2 - Half-duplex on ESC Header):
+  PB6 = TX/RX (single-wire bidirectional)
+  Note: Directly on ESC header, shared with PWM motor output
+        SRXL2 mode uses USART1, PWM mode uses TIM4_CH1
+
 PWM Outputs (50Hz, 1µs resolution):
   PB4 = TIM3_CH1 - S1 (Steering)
   PB5 = TIM3_CH2 - S2 (unused)
   PB0 = TIM3_CH3 - S3 (E-brake)
   PB3 = TIM2_CH2 - S4 (Aux)
-  PB6 = TIM4_CH1 - ESC Header (Motor/Throttle)
+  PB6 = TIM4_CH1 - ESC Header (Motor/Throttle in PWM mode)
 ```
 
 ### Nexus Connector Pinout
@@ -83,7 +91,7 @@ PWM Outputs (50Hz, 1µs resolution):
 - Pin 3: RX (to receiver TX)
 - Pin 4: TX (to receiver RX, for telemetry)
 
-**ESC Header:** Connect ESC signal wire here (throttle output)
+**ESC Header:** Connect Spektrum Smart ESC here (SRXL2 bidirectional on signal wire)
 
 **S1/S2/S3 Servo Headers:** Connect steering servo to S1, e-brake to S3
 
@@ -172,10 +180,31 @@ GroundFlight Status:
   IMU:      ICM-42688-P (WHO_AM_I=0x47)
   CRSF:     Connected (1234 frames, 0 errors)
   Link:     RSSI=-65dBm LQ=100%
-  ESC:      Not initialized
+  ESC:      SRXL2 mode (0 RPM)
   Armed:    NO (flip CH5 with throttle neutral to arm)
   Clock:    216 MHz
   Uptime:   12345 ms
+
+> esc
+ESC Status:
+  Mode:     SRXL2 [CONNECTED]
+  ESC ID:   0x40 (baud cap: 0x00)
+  Baud:     115200
+  Re-HS:    0
+  TX pkts:  843
+  RX pkts:  917
+  CRC errs: 0
+  RX breakdown:
+    Handshake: 2
+    Telemetry: 73
+    Control:   842
+    Other:     0
+    Last type: 0xCD
+  Telemetry: Valid
+  RPM:      0
+  Voltage:  24.30 V
+  Current:  0.00 A
+  Temp:     38.00 C
 
 > pass
 Passthrough monitor (any key to exit):
@@ -234,7 +263,7 @@ steering_out = steering_in + (gyro_yaw * gain)
 | 10 | Brake-aware | 🔲 | Reduce gain during braking |
 | 11 | Tuning | 🔲 | Gain knob via aux channel, CLI params |
 | 12 | Config save | 🔲 | Persist to flash |
-| 13 | ESC telemetry | 🔲 | SRXL2 for speed-from-RPM |
+| 13 | ESC telemetry | ✅ | SRXL2: voltage, current, temp working; RPM needs ESC config |
 | 14 | MSP protocol | 🔲 | DVR arm signal, OSD |
 | 15 | HIL testing | 🔲 | Automated safety regression |
 
@@ -281,10 +310,10 @@ See [TESTING.md](TESTING.md) for the full testing strategy.
 
 - **Flight Controller:** RadioMaster Nexus
 - **Receiver:** RadioMaster RP3-H (ELRS 2.4GHz)
-- **Transmitter:** Jumper T-20 (ELRS), RadioMaster TX16S
+- **Transmitter:** RP3-H flashed as TX
 - **ESC:** Spektrum Firma 150A Smart ESC
 - **Vehicle:** Arrma Infraction 6S
-- **Also compatible:** Any ELRS receiver with CRSF output
+- **Also compatible:** Any receiver with CRSF output
 
 ## Project Structure
 
@@ -310,7 +339,8 @@ groundflight/
     │   ├── uart.c/h       # Interrupt-driven UART
     │   ├── pwm.c/h        # Servo PWM output
     │   ├── spi.c/h        # SPI bus driver
-    │   └── esc_*.c/h      # ESC telemetry (stub)
+    │   ├── esc.c/h        # ESC abstraction (PWM or SRXL2)
+    │   └── srxl2.c/h      # SRXL2 protocol driver
     ├── flight/
     │   ├── stabilizer.c/h # Yaw stabilization (stub)
     │   ├── mixer.c/h      # Channel mixing (stub)
@@ -350,6 +380,47 @@ APB1 timer clock = 108MHz. For 50Hz servo PWM with 1µs resolution:
 - Prescaler = 107 (108MHz / 108 = 1MHz)
 - Period = 19999 (20ms = 50Hz)
 - CCR = pulse width in microseconds
+
+### SRXL2 Protocol Implementation
+
+SRXL2 is Spektrum's bidirectional serial protocol for Smart ESCs, receivers, and servos. Key implementation details:
+
+**Physical Layer:**
+- Half-duplex on single wire (PB6, shared with PWM output)
+- 115200 baud, 8N1 (400k negotiable but our ESC doesn't support it)
+- GPIO must be **push-pull**, not open-drain — internal pull-up is too weak for cable capacitance, causing slow rise times and framing errors
+
+**Byte Order (critical!):**
+- SRXL2 native fields (channel data, masks): **little-endian**
+- CRC-16: **big-endian** (exception to the rule)
+- Telemetry payload (X-Bus legacy): **big-endian**
+
+**Channel Values:**
+- 16-bit unsigned, lower 2 bits must be 0
+- 0 = full reverse, 32768 = neutral, 65532 = full forward
+- Surface ESCs use Channel 0 for throttle
+
+**Handshake Sequence:**
+1. FC listens for 250ms for ESC auto-announce (0x40 sends every 50ms at boot)
+2. If no announce, FC polls ESC with handshake to 0x40
+3. FC sends broadcast handshake (dest=0xFF) with **agreed** baud rate
+4. FC enters running state, sends channel data at 50Hz
+
+**Common Pitfalls:**
+- Open-drain GPIO: Rise times too slow for 115200 baud with long cables
+- Baud negotiation: Broadcast must contain agreed rate, not capabilities
+- Echo detection: Half-duplex means we receive our own packets — don't double-count
+- Car ESC reverse: Requires double-tap (brake → neutral → reverse)
+- RPM telemetry: May read 0 until motor pole count configured in ESC
+
+**CLI Commands:**
+```
+> esc              # Show SRXL2 status and telemetry
+> esc pwm          # Switch to PWM mode (no telemetry)
+> esc srxl2        # Switch to SRXL2 mode
+> motor_test       # Enable direct throttle control (bypasses ARM)
+> throttle <val>   # Set throttle (1000-2000 mapped to SRXL2 range)
+```
 
 ### Car ESC Neutral
 

@@ -2,6 +2,11 @@
  * UART Driver
  * 
  * Interrupt-driven UART with ring buffers
+ * 
+ * Supported peripherals:
+ *   USART1 - ESC telemetry, half-duplex on PB6 (AF7) @ 115200
+ *            Single-wire bidirectional for SRXL2 protocol
+ *   UART4  - CRSF receiver (PA0=RX, PA1=TX, AF8) @ 420000
  */
 
 #include "uart.h"
@@ -19,12 +24,23 @@ typedef struct {
     volatile uint16_t tail;  /* Read index (main) */
 } ring_buffer_t;
 
-/* UART handles and buffers */
+/* USART1 - ESC (half-duplex on PB6) */
+static UART_HandleTypeDef huart1;
+static ring_buffer_t uart1_rx_buf;
+static bool uart1_initialized = false;
+
+/* UART4 - CRSF */
 static UART_HandleTypeDef huart4;
 static ring_buffer_t uart4_rx_buf;
 static bool uart4_initialized = false;
 
+/* RX byte counters (for debugging) */
+volatile uint32_t uart1_rx_count = 0;
+volatile uint32_t uart4_rx_count = 0;
+
 /* Forward declarations */
+static bool uart1_init_halfduplex(uint32_t baudrate);
+static void uart1_deinit(void);
 static bool uart4_init(uint32_t baudrate);
 
 /* ============================================================================
@@ -37,13 +53,23 @@ bool uart_init(uart_port_t port, uint32_t baudrate)
         case UART_CRSF:
             return uart4_init(baudrate);
         case UART_ESC:
-            /* TODO: UART3 for ESC telemetry */
-            return false;
+            return uart1_init_halfduplex(baudrate);
         case UART_AUX:
             /* TODO: UART6 spare */
             return false;
         default:
             return false;
+    }
+}
+
+void uart_deinit(uart_port_t port)
+{
+    switch (port) {
+        case UART_ESC:
+            uart1_deinit();
+            break;
+        default:
+            break;
     }
 }
 
@@ -55,6 +81,10 @@ uint16_t uart_available(uart_port_t port)
         case UART_CRSF:
             if (!uart4_initialized) return 0;
             buf = &uart4_rx_buf;
+            break;
+        case UART_ESC:
+            if (!uart1_initialized) return 0;
+            buf = &uart1_rx_buf;
             break;
         default:
             return 0;
@@ -71,6 +101,10 @@ int16_t uart_read_byte(uart_port_t port)
         case UART_CRSF:
             if (!uart4_initialized) return -1;
             buf = &uart4_rx_buf;
+            break;
+        case UART_ESC:
+            if (!uart1_initialized) return -1;
+            buf = &uart1_rx_buf;
             break;
         default:
             return -1;
@@ -106,11 +140,24 @@ void uart_send(uart_port_t port, const uint8_t *data, uint16_t len)
             if (!uart4_initialized) return;
             huart = &huart4;
             break;
+        case UART_ESC:
+            if (!uart1_initialized) return;
+            huart = &huart1;
+            break;
         default:
             return;
     }
     
+    /* For half-duplex (USART1), HAL handles direction automatically */
     HAL_UART_Transmit(huart, (uint8_t *)data, len, 100);
+    
+    /* For half-duplex, wait for transmission complete before returning
+     * so the line is released for the slave to respond */
+    if (port == UART_ESC) {
+        while (!__HAL_UART_GET_FLAG(huart, UART_FLAG_TC)) {
+            /* Wait for TC flag */
+        }
+    }
 }
 
 void uart_send_byte(uart_port_t port, uint8_t byte)
@@ -118,9 +165,179 @@ void uart_send_byte(uart_port_t port, uint8_t byte)
     uart_send(port, &byte, 1);
 }
 
+/* Simple printf helper for integers */
+static void print_int(int32_t val)
+{
+    extern void usb_cdc_print(const char *str);
+    extern void usb_cdc_send(const uint8_t *data, uint16_t len);
+    char buf[16];
+    int i = 0;
+    bool neg = false;
+    
+    if (val < 0) {
+        neg = true;
+        val = -val;
+    }
+    
+    if (val == 0) {
+        buf[i++] = '0';
+    } else {
+        while (val > 0) {
+            buf[i++] = '0' + (val % 10);
+            val /= 10;
+        }
+    }
+    
+    if (neg) {
+        usb_cdc_print("-");
+    }
+    
+    /* Reverse and print */
+    while (i > 0) {
+        uint8_t c = buf[--i];
+        usb_cdc_send(&c, 1);
+    }
+}
+
+void uart_debug_dump(uart_port_t port)
+{
+    if (port != UART_ESC || !uart1_initialized) return;
+    
+    const char hex[] = "0123456789ABCDEF";
+    uint8_t buf[32];
+    
+    /* Copy last 32 bytes without consuming */
+    for (int i = 0; i < 32; i++) {
+        uint16_t idx = (uart1_rx_buf.head - 32 + i) & UART_RX_BUF_MASK;
+        buf[i] = uart1_rx_buf.data[idx];
+    }
+    
+    /* Print via USB CDC */
+    extern void usb_cdc_print(const char *str);
+    extern void usb_cdc_send(const uint8_t *data, uint16_t len);
+    
+    for (int i = 0; i < 32; i++) {
+        usb_cdc_send((uint8_t*)&hex[(buf[i] >> 4) & 0xF], 1);
+        usb_cdc_send((uint8_t*)&hex[buf[i] & 0xF], 1);
+        usb_cdc_print(" ");
+        if (i == 15) usb_cdc_print("\r\n             ");
+    }
+    usb_cdc_print("\r\n");
+
+    usb_cdc_print("  RX head:   ");
+    print_int(uart1_rx_buf.head);
+    usb_cdc_print("\r\n");
+}
+
+/* ============================================================================
+ * USART1 - ESC Telemetry (Half-duplex on PB6)
+ * 
+ * Single-wire bidirectional UART for SRXL2 protocol.
+ * PB6 = USART1_TX (AF7) configured as open-drain with pull-up.
+ * Half-duplex mode enabled via HDSEL bit.
+ * ============================================================================ */
+
+static bool uart1_init_halfduplex(uint32_t baudrate)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    
+    /* Enable clocks */
+    __HAL_RCC_USART1_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    
+    /* Configure GPIO pin PB6 for half-duplex: */
+    GPIO_InitStruct.Pin = GPIO_PIN_6;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;     /* Push-pull */
+    GPIO_InitStruct.Pull = GPIO_NOPULL;         /*  External or line capacitance handles it */
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF7_USART1;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    
+    /* Initialize ring buffer */
+    uart1_rx_buf.head = 0;
+    uart1_rx_buf.tail = 0;
+    
+    /* Configure USART1 */
+    huart1.Instance = USART1;
+    huart1.Init.BaudRate = baudrate;
+    huart1.Init.WordLength = UART_WORDLENGTH_8B;
+    huart1.Init.StopBits = UART_STOPBITS_1;
+    huart1.Init.Parity = UART_PARITY_NONE;
+    huart1.Init.Mode = UART_MODE_TX_RX;
+    huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+    huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+    huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+    
+    if (HAL_HalfDuplex_Init(&huart1) != HAL_OK) {
+        return false;
+    }
+    
+    /* Enable RXNE interrupt */
+    __HAL_UART_ENABLE_IT(&huart1, UART_IT_RXNE);
+    
+    /* Enable USART1 interrupt in NVIC */
+    HAL_NVIC_SetPriority(USART1_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(USART1_IRQn);
+    
+    uart1_initialized = true;
+    return true;
+}
+
+static void uart1_deinit(void)
+{
+    if (!uart1_initialized) return;
+    
+    /* Disable interrupt */
+    HAL_NVIC_DisableIRQ(USART1_IRQn);
+    __HAL_UART_DISABLE_IT(&huart1, UART_IT_RXNE);
+    
+    /* Deinit UART */
+    HAL_UART_DeInit(&huart1);
+    
+    /* Reset GPIO to default (input) */
+    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_6);
+    
+    /* Disable USART1 clock */
+    __HAL_RCC_USART1_CLK_DISABLE();
+    
+    uart1_initialized = false;
+}
+
+/* USART1 interrupt handler */
+void USART1_IRQHandler(void)
+{
+    /* Check for RX not empty */
+    if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_RXNE)) {
+        uint8_t data = (uint8_t)(huart1.Instance->RDR & 0xFF);
+        
+        /* Store in ring buffer */
+        uint16_t next_head = (uart1_rx_buf.head + 1) & UART_RX_BUF_MASK;
+        if (next_head != uart1_rx_buf.tail) {
+            /* Buffer not full */
+            uart1_rx_buf.data[uart1_rx_buf.head] = data;
+            uart1_rx_buf.head = next_head;
+        }
+        uart1_rx_count++;
+    }
+    
+    /* Clear overrun error if set (prevents lockup) */
+    if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_ORE)) {
+        __HAL_UART_CLEAR_OREFLAG(&huart1);
+    }
+    
+    /* Clear any other error flags */
+    if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_FE)) {
+        __HAL_UART_CLEAR_FEFLAG(&huart1);
+    }
+    if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_NE)) {
+        __HAL_UART_CLEAR_NEFLAG(&huart1);
+    }
+}
+
 /* ============================================================================
  * UART4 - CRSF Receiver
- * Pins: PA0 = RX, PA1 = TX (AF8)
+ * Pins: PA0 = RX, PA1 = TX (AF8) with TX/RX swap enabled
  * ============================================================================ */
 
 static bool uart4_init(uint32_t baudrate)
@@ -157,7 +374,10 @@ static bool uart4_init(uint32_t baudrate)
     huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
     huart4.Init.OverSampling = UART_OVERSAMPLING_16;
     huart4.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-    huart4.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+    
+    /* Enable TX/RX pin swap - Nexus routes PA0 to RX, PA1 to TX */
+    huart4.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_SWAP_INIT;
+    huart4.AdvancedInit.Swap = UART_ADVFEATURE_SWAP_ENABLE;
     
     if (HAL_UART_Init(&huart4) != HAL_OK) {
         return false;
@@ -188,7 +408,7 @@ void UART4_IRQHandler(void)
             uart4_rx_buf.data[uart4_rx_buf.head] = data;
             uart4_rx_buf.head = next_head;
         }
-        /* If buffer full, data is dropped */
+        uart4_rx_count++;
     }
     
     /* Clear overrun error if set (prevents lockup) */
