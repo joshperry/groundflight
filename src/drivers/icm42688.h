@@ -132,4 +132,9 @@ void icm42688_calibrate_gyro(uint16_t samples);
  */
 void icm42688_get_gyro_bias(float *bias_x, float *bias_y, float *bias_z);
 
+/**
+ * Set gyro bias directly (for external calibration loops)
+ */
+void icm42688_set_gyro_bias(float bias_x, float bias_y, float bias_z);
+
 #endif /* ICM42688_H */

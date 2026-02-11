@@ -332,3 +332,10 @@ void icm42688_get_gyro_bias(float *bias_x, float *bias_y, float *bias_z)
     if (bias_y) *bias_y = gyro_bias_y;
     if (bias_z) *bias_z = gyro_bias_z;
 }
+
+void icm42688_set_gyro_bias(float bias_x, float bias_y, float bias_z)
+{
+    gyro_bias_x = bias_x;
+    gyro_bias_y = bias_y;
+    gyro_bias_z = bias_z;
+}

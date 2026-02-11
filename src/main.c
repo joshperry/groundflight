@@ -883,18 +883,8 @@ static void cli_process_line(const char *line)
 
 void drivers_init(void)
 {
-    /* Initialize IMU */
+    /* Initialize IMU (SPI, no blocking) */
     imu_ok = icm42688_init();
-
-    /* Auto-calibrate gyro on boot (like Betaflight).
-     * LED on solid = hold still, LED off = done.
-     * Must happen BEFORE ESC init - the ~1s blocking calibration
-     * would starve the SRXL2 handshake state machine. */
-    if (imu_ok) {
-        target_led_on();
-        icm42688_calibrate_gyro(1000);
-        target_led_off();
-    }
 
     /* Initialize CRSF receiver */
     crsf_ok = crsf_init();
@@ -902,9 +892,42 @@ void drivers_init(void)
     /* Initialize PWM outputs */
     pwm_ok = pwm_init();
 
-    /* Initialize ESC driver - SRXL2 handshake starts immediately,
-     * esc_process() in main loop drives it to completion. */
+    /* Initialize ESC FIRST - SRXL2 handshake must catch the ESC's
+     * 200ms auto-announce window after power-on. */
     esc_ok = esc_init(ESC_MODE_SRXL2);
+
+    /* Auto-calibrate gyro while keeping SRXL2 alive.
+     * The cal needs ~1000 samples at 1kHz = ~1 second.
+     * We interleave esc_process() so the SRXL2 handshake
+     * completes during calibration instead of being starved. */
+    if (imu_ok) {
+        target_led_on();
+
+        float sum_x = 0.0f, sum_y = 0.0f, sum_z = 0.0f;
+        float gyro_scale = icm42688_get_gyro_scale();
+        uint16_t count = 0;
+        const uint16_t target_samples = 1000;
+
+        while (count < target_samples) {
+            /* Service SRXL2 handshake between gyro reads */
+            if (esc_ok) esc_process();
+
+            if (icm42688_data_ready()) {
+                icm42688_raw_data_t raw;
+                if (icm42688_read_raw(&raw)) {
+                    sum_x += (float)raw.gyro_x / gyro_scale;
+                    sum_y += (float)raw.gyro_y / gyro_scale;
+                    sum_z += (float)raw.gyro_z / gyro_scale;
+                    count++;
+                }
+            }
+        }
+
+        icm42688_set_gyro_bias(sum_x / (float)count,
+                               sum_y / (float)count,
+                               sum_z / (float)count);
+        target_led_off();
+    }
 }
 
 void flight_init(void)
