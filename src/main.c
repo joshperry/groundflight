@@ -145,13 +145,8 @@ int main(void)
     flight_init();
     config_init();
 
-    /* Auto-calibrate gyro on boot (like Betaflight)
-     * LED on solid = hold still, LED off = done.
-     * Must happen before watchdog since calibration takes ~1s. */
+    /* Enable stabilizer if gyro was calibrated on boot */
     if (imu_ok) {
-        target_led_on();
-        icm42688_calibrate_gyro(1000);  /* 1000 samples @ 1kHz = ~1 second */
-        target_led_off();
         stabilizer_set_mode(STAB_MODE_NORMAL);
     }
 
@@ -890,14 +885,25 @@ void drivers_init(void)
 {
     /* Initialize IMU */
     imu_ok = icm42688_init();
-    
+
+    /* Auto-calibrate gyro on boot (like Betaflight).
+     * LED on solid = hold still, LED off = done.
+     * Must happen BEFORE ESC init - the ~1s blocking calibration
+     * would starve the SRXL2 handshake state machine. */
+    if (imu_ok) {
+        target_led_on();
+        icm42688_calibrate_gyro(1000);
+        target_led_off();
+    }
+
     /* Initialize CRSF receiver */
     crsf_ok = crsf_init();
-    
+
     /* Initialize PWM outputs */
     pwm_ok = pwm_init();
-    
-    /* Initialize ESC driver (defaults to PWM mode) */
+
+    /* Initialize ESC driver - SRXL2 handshake starts immediately,
+     * esc_process() in main loop drives it to completion. */
     esc_ok = esc_init(ESC_MODE_SRXL2);
 }
 
