@@ -145,6 +145,16 @@ int main(void)
     flight_init();
     config_init();
 
+    /* Auto-calibrate gyro on boot (like Betaflight)
+     * LED on solid = hold still, LED off = done.
+     * Must happen before watchdog since calibration takes ~1s. */
+    if (imu_ok) {
+        target_led_on();
+        icm42688_calibrate_gyro(1000);  /* 1000 samples @ 1kHz = ~1 second */
+        target_led_off();
+        stabilizer_set_mode(STAB_MODE_NORMAL);
+    }
+
     /* Start watchdog last - everything must be initialized first */
     target_watchdog_init();
     
@@ -183,7 +193,16 @@ int main(void)
             } else {
                 usb_cdc_print("NOT INITIALIZED\r\n");
             }
-            usb_cdc_print("Mode: Passthrough (run 'cal' then 'stab on' to enable stabilization)\r\n");
+            if (imu_ok) {
+                float bx, by, bz;
+                icm42688_get_gyro_bias(&bx, &by, &bz);
+                usb_cdc_print("Gyro: Auto-calibrated (bias Z=");
+                print_float(bz);
+                usb_cdc_print(" dps)\r\n");
+                usb_cdc_print("Mode: Stabilization active ('stab off' to disable)\r\n");
+            } else {
+                usb_cdc_print("Mode: Passthrough (no IMU)\r\n");
+            }
             usb_cdc_print("\r\n> ");
             sent_banner = true;
         }
