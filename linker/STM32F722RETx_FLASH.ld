@@ -18,7 +18,7 @@ _estack = ORIGIN(DTCM) + LENGTH(DTCM);
 
 /* Minimum heap and stack sizes */
 _Min_Heap_Size  = 0x4000;  /* 16KB heap */
-_Min_Stack_Size = 0x1000;  /* 4KB stack */
+_Min_Stack_Size = 0x2000;  /* 8KB stack (nested ISRs + float math) */
 
 MEMORY
 {

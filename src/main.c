@@ -11,12 +11,16 @@
 #include "crsf.h"
 #include "pwm.h"
 #include "esc.h"
+#include "config.h"
+#include "gyro.h"
+#include "speed.h"
+#include "stabilizer.h"
+#include "mixer.h"
 #include <string.h>
 
-/* Forward declarations for driver stubs */
+/* Forward declarations */
 void drivers_init(void);
 void flight_init(void);
-void config_init(void);
 
 /* Simple CLI state */
 #define CLI_BUF_SIZE 128
@@ -25,6 +29,22 @@ static uint8_t cli_pos = 0;
 
 static void cli_process_line(const char *line);
 static void cli_poll(void);
+
+/* Non-blocking CLI monitor state machine */
+typedef enum {
+    MONITOR_NONE = 0,
+    MONITOR_GYRO,
+    MONITOR_CRSF,
+    MONITOR_PASS,
+    MONITOR_STAB,
+} monitor_mode_t;
+
+static monitor_mode_t monitor_mode = MONITOR_NONE;
+static uint32_t monitor_last_ms = 0;
+#define MONITOR_INTERVAL_MS 50
+
+static void cli_monitor_tick(uint32_t now);
+static void cli_monitor_stop(void);
 
 /* IMU state */
 static bool imu_ok = false;
@@ -42,6 +62,8 @@ static bool esc_ok = false;
 static bool armed = false;
 
 static bool motor_test_mode = false;
+static uint32_t motor_test_start_ms = 0;
+#define MOTOR_TEST_TIMEOUT_MS (5 * 60 * 1000)  /* 5 minutes */
 
 /* Arm channel configuration */
 #define ARM_CHANNEL         4       /* CH5 (0-indexed) */
@@ -90,10 +112,16 @@ static void print_float(float val)
         usb_cdc_print("-");
         val = -val;
     }
-    
+
     int32_t int_part = (int32_t)val;
-    int32_t frac_part = (int32_t)((val - int_part) * 100);
-    
+    int32_t frac_part = (int32_t)((val - (float)int_part) * 100.0f + 0.5f);
+
+    /* Handle rounding overflow (e.g., 9.999 -> frac rounds to 100) */
+    if (frac_part >= 100) {
+        int_part++;
+        frac_part = 0;
+    }
+
     print_int(int_part);
     usb_cdc_print(".");
     if (frac_part < 10) usb_cdc_print("0");
@@ -116,6 +144,9 @@ int main(void)
     drivers_init();
     flight_init();
     config_init();
+
+    /* Start watchdog last - everything must be initialized first */
+    target_watchdog_init();
     
     /* Main loop */
     uint32_t last_blink = 0;
@@ -123,6 +154,7 @@ int main(void)
     bool sent_banner = false;
     
     while (1) {
+        target_watchdog_feed();
         uint32_t now = target_millis();
         
         /* Send banner once USB is connected */
@@ -151,19 +183,37 @@ int main(void)
             } else {
                 usb_cdc_print("NOT INITIALIZED\r\n");
             }
-            usb_cdc_print("Mode: Passthrough (CH5=Arm, CH1->Steer, CH3->Motor, CH4->Brake)\r\n");
+            usb_cdc_print("Mode: Passthrough (run 'cal' then 'stab on' to enable stabilization)\r\n");
             usb_cdc_print("\r\n> ");
             sent_banner = true;
         }
         
         /* Process CLI input */
         cli_poll();
-        
+
+        /* Non-blocking CLI monitor display */
+        cli_monitor_tick(now);
+
         /* Process CRSF frames */
         if (crsf_ok) {
             crsf_process();
         }
-        
+
+        /* Read and filter IMU data */
+        if (imu_ok) {
+            icm42688_data_t imu_data;
+            if (icm42688_read(&imu_data)) {
+                /* Update gyro filter with raw data */
+                gyro_update(imu_data.gyro_x, imu_data.gyro_y, imu_data.gyro_z);
+            }
+        }
+
+        /* Update speed estimate from ESC telemetry */
+        if (esc_ok && esc_telemetry_valid()) {
+            const esc_telemetry_t *telem = esc_get_telemetry();
+            speed_update(telem->rpm);
+        }
+
         /* Blink LED - faster when USB connected, fastest if IMU ok */
         uint32_t blink_interval = imu_ok ? 100 : (usb_cdc_is_connected() ? 250 : 500);
         if ((now - last_blink) >= blink_interval) {
@@ -172,6 +222,13 @@ int main(void)
             last_blink = now;
         }
         
+        /* Auto-disable motor test mode after timeout */
+        if (motor_test_mode && (now - motor_test_start_ms) >= MOTOR_TEST_TIMEOUT_MS) {
+            motor_test_mode = false;
+            esc_set_throttle(ESC_THROTTLE_CENTER);
+            usb_cdc_print("\r\n[motor_test auto-disabled after 5 min]\r\n> ");
+        }
+
         /* Arm/Disarm logic */
         if (crsf_ok && pwm_ok) {
             const crsf_state_t *crsf = crsf_get_state();
@@ -194,11 +251,41 @@ int main(void)
                 }
             }
             
-            /* Output logic - single code path */
+            /* Output logic - stabilizer pipeline */
             if (armed) {
-                pwm_set_crsf(PWM_STEERING, crsf->channels[0]);
-                pwm_set_crsf(PWM_EBRAKE,   crsf->channels[3]);
-                esc_set_throttle_crsf(crsf->channels[2]);  /* ESC driver handles mode */
+                /* Get filtered gyro data */
+                const gyro_filtered_t *gyro = gyro_get_filtered();
+
+                /* Convert CRSF channels to normalized float */
+                float steer_cmd = crsf_to_float(crsf->channels[0]);    /* CH1 */
+                float throttle_cmd = crsf_to_float(crsf->channels[2]); /* CH3 */
+                float ebrake_cmd = crsf_to_float(crsf->channels[3]);   /* CH4 */
+
+                /* E-brake is 0.0 to 1.0, not bipolar */
+                ebrake_cmd = (ebrake_cmd + 1.0f) / 2.0f;
+
+                /* Get current speed */
+                float speed_mph = speed_get_mph();
+
+                /* Run stabilizer (gain_knob defaults to 1.0 for MVP) */
+                float correction = stabilizer_update(steer_cmd, gyro->yaw_rate,
+                                                     speed_mph, throttle_cmd, 1.0f);
+
+                /* Run mixer */
+                mixer_update(steer_cmd, throttle_cmd, ebrake_cmd, 0.0f, correction);
+
+                /* Get mixed outputs */
+                const mixer_output_t *mixed = mixer_get_output();
+
+                /* Convert back to CRSF range and output */
+                uint16_t steer_crsf = (uint16_t)(CRSF_CHANNEL_MID +
+                                      mixed->steer * (CRSF_CHANNEL_MAX - CRSF_CHANNEL_MID));
+                uint16_t ebrake_crsf = (uint16_t)(CRSF_CHANNEL_MIN +
+                                       mixed->ebrake * (CRSF_CHANNEL_MAX - CRSF_CHANNEL_MIN));
+
+                pwm_set_crsf(PWM_STEERING, steer_crsf);
+                pwm_set_crsf(PWM_EBRAKE, ebrake_crsf);
+                esc_set_throttle_crsf(crsf->channels[2]);  /* Throttle passthrough */
             } else {
                 /* Disarmed = failsafe = outputs neutral */
                 pwm_set_pulse(PWM_STEERING, PWM_PULSE_CENTER);
@@ -224,8 +311,11 @@ int main(void)
 
 static void cli_poll(void)
 {
+    /* During monitor mode, input is consumed by cli_monitor_tick() */
+    if (monitor_mode != MONITOR_NONE) return;
+
     int16_t c;
-    
+
     while ((c = usb_cdc_read_byte()) >= 0) {
         if (c == '\r' || c == '\n') {
             if (cli_pos > 0) {
@@ -253,6 +343,115 @@ static void cli_poll(void)
     }
 }
 
+static void cli_monitor_stop(void)
+{
+    monitor_mode = MONITOR_NONE;
+    usb_cdc_print("\r\n> ");
+}
+
+static void cli_monitor_tick(uint32_t now)
+{
+    if (monitor_mode == MONITOR_NONE) return;
+
+    /* Check for any key to stop */
+    if (usb_cdc_available() > 0) {
+        usb_cdc_read_byte();
+        cli_monitor_stop();
+        return;
+    }
+
+    /* Rate-limit display to 20Hz */
+    if ((now - monitor_last_ms) < MONITOR_INTERVAL_MS) return;
+    monitor_last_ms = now;
+
+    switch (monitor_mode) {
+    case MONITOR_GYRO: {
+        icm42688_data_t data;
+        if (icm42688_read(&data)) {
+            usb_cdc_print("\r  ");
+            print_float(data.gyro_x);
+            usb_cdc_print("      ");
+            print_float(data.gyro_y);
+            usb_cdc_print("      ");
+            print_float(data.gyro_z);
+            usb_cdc_print("      ");
+            print_float(data.temp_c);
+            usb_cdc_print(" C   ");
+        }
+        break;
+    }
+
+    case MONITOR_CRSF: {
+        const crsf_state_t *crsf = crsf_get_state();
+        usb_cdc_print("\r    ");
+        for (int i = 0; i < 8; i++) {
+            uint16_t val = crsf->channels[i];
+            if (val < 1000) usb_cdc_print(" ");
+            if (val < 100)  usb_cdc_print(" ");
+            print_int(val);
+            usb_cdc_print(" ");
+        }
+        if (crsf->failsafe) {
+            usb_cdc_print(" [FAILSAFE]");
+        } else {
+            usb_cdc_print(" LQ=");
+            print_int(crsf->link.uplink_link_quality);
+            usb_cdc_print("%");
+        }
+        usb_cdc_print("   ");
+        break;
+    }
+
+    case MONITOR_PASS: {
+        /* Display uses the same arm/output state driven by main loop */
+        usb_cdc_print("\r");
+        if (armed) {
+            usb_cdc_print("[ARMED]   ");
+        } else {
+            usb_cdc_print("[DISARMED]");
+        }
+        usb_cdc_print(" Steer:");
+        print_int(pwm_get_pulse(PWM_STEERING));
+        usb_cdc_print(" Motor:");
+        print_int(pwm_get_pulse(PWM_MOTOR));
+        usb_cdc_print(" Brake:");
+        print_int(pwm_get_pulse(PWM_EBRAKE));
+        const crsf_state_t *crsf_p = crsf_get_state();
+        usb_cdc_print(" LQ=");
+        print_int(crsf_p->link.uplink_link_quality);
+        usb_cdc_print("%    ");
+        break;
+    }
+
+    case MONITOR_STAB: {
+        const gyro_filtered_t *gyro = gyro_get_filtered();
+        const crsf_state_t *crsf_s = crsf_get_state();
+        float steer_cmd = crsf_to_float(crsf_s->channels[0]);
+        float speed_mph = speed_get_mph();
+
+        usb_cdc_print("\r  ");
+        print_float(gyro->yaw_rate);
+        usb_cdc_print("     ");
+        print_float(speed_mph);
+        usb_cdc_print("   ");
+        print_float(steer_cmd);
+        usb_cdc_print("      ");
+        /* Show last correction from stabilizer (already computed by main loop) */
+        float expected = steer_cmd * config_get()->yaw_rate_scale;
+        float error = expected - gyro->yaw_rate;
+        float correction = config_get()->kp * error;
+        print_float(correction);
+        usb_cdc_print("       ");
+        print_float(error);
+        usb_cdc_print("    ");
+        break;
+    }
+
+    default:
+        break;
+    }
+}
+
 static void cli_process_line(const char *line)
 {
     /* Skip leading spaces */
@@ -273,6 +472,9 @@ static void cli_process_line(const char *line)
         usb_cdc_print("  crsf      - Show live CRSF channel data\r\n");
         usb_cdc_print("  servo N P - Set servo N (0-4) to pulse P (1000-2000)\r\n");
         usb_cdc_print("  pass      - Monitor passthrough and arm state\r\n");
+        usb_cdc_print("  stab      - Monitor stabilizer (gyro, speed, correction)\r\n");
+        usb_cdc_print("  stab on   - Enable stabilizer\r\n");
+        usb_cdc_print("  stab off  - Disable stabilizer\r\n");
         usb_cdc_print("  esc       - Show ESC status and telemetry\r\n");
         usb_cdc_print("  esc pwm   - Switch to PWM mode\r\n");
         usb_cdc_print("  esc srxl2 - Switch to SRXL2 mode\r\n");
@@ -379,25 +581,8 @@ static void cli_process_line(const char *line)
         }
         usb_cdc_print("Live gyro data (any key to stop):\r\n");
         usb_cdc_print("    X (roll)    Y (pitch)   Z (yaw)     Temp\r\n");
-        
-        while (usb_cdc_available() == 0) {
-            icm42688_data_t data;
-            if (icm42688_read(&data)) {
-                usb_cdc_print("\r  ");
-                print_float(data.gyro_x);
-                usb_cdc_print("      ");
-                print_float(data.gyro_y);
-                usb_cdc_print("      ");
-                print_float(data.gyro_z);
-                usb_cdc_print("      ");
-                print_float(data.temp_c);
-                usb_cdc_print(" C   ");
-            }
-            target_delay_ms(50);
-        }
-        /* Consume the key that stopped us */
-        usb_cdc_read_byte();
-        usb_cdc_print("\r\n");
+        monitor_mode = MONITOR_GYRO;
+        monitor_last_ms = target_millis();
     }
     else if (strcmp(line, "gyroraw") == 0) {
         if (!imu_ok) {
@@ -433,6 +618,10 @@ static void cli_process_line(const char *line)
         usb_cdc_print(" Z=");
         print_float(bz);
         usb_cdc_print(" dps\r\n");
+
+        /* Auto-enable stabilizer after calibration */
+        stabilizer_set_mode(STAB_MODE_NORMAL);
+        usb_cdc_print("Stabilizer auto-enabled (use 'stab off' to disable)\r\n");
     }
     else if (strcmp(line, "crsf") == 0) {
         if (!crsf_ok) {
@@ -441,37 +630,8 @@ static void cli_process_line(const char *line)
         }
         usb_cdc_print("Live CRSF data (any key to stop):\r\n");
         usb_cdc_print("CH:  1     2     3     4     5     6     7     8\r\n");
-        
-        while (usb_cdc_available() == 0) {
-            crsf_process();  /* Keep processing while displaying */
-            
-            const crsf_state_t *crsf = crsf_get_state();
-            
-            usb_cdc_print("\r    ");
-            for (int i = 0; i < 8; i++) {
-                /* Print channel value (pad to 5 chars) */
-                uint16_t val = crsf->channels[i];
-                if (val < 1000) usb_cdc_print(" ");
-                if (val < 100)  usb_cdc_print(" ");
-                print_int(val);
-                usb_cdc_print(" ");
-            }
-            
-            /* Show connection status */
-            if (crsf->failsafe) {
-                usb_cdc_print(" [FAILSAFE]");
-            } else {
-                usb_cdc_print(" LQ=");
-                print_int(crsf->link.uplink_link_quality);
-                usb_cdc_print("%");
-            }
-            usb_cdc_print("   ");
-            
-            target_delay_ms(50);
-        }
-        /* Consume the key that stopped us */
-        usb_cdc_read_byte();
-        usb_cdc_print("\r\n");
+        monitor_mode = MONITOR_CRSF;
+        monitor_last_ms = target_millis();
     }
     else if (strncmp(line, "servo ", 6) == 0) {
         if (!pwm_ok) {
@@ -520,63 +680,26 @@ static void cli_process_line(const char *line)
         }
         usb_cdc_print("Passthrough monitor (any key to exit):\r\n");
         usb_cdc_print("  CH5=Arm  CH1->Steering  CH3->Motor  CH4->Ebrake\r\n\r\n");
-        
-        while (usb_cdc_available() == 0) {
-            crsf_process();
-            esc_process();  /* Process ESC telemetry */
-            
-            const crsf_state_t *crsf = crsf_get_state();
-            
-            /* Arm/disarm logic (same as main loop) */
-            if (crsf->failsafe) {
-                armed = false;
-            } else {
-                uint16_t arm_ch = crsf_to_us(crsf->channels[ARM_CHANNEL]);
-                uint16_t throttle_ch = crsf_to_us(crsf->channels[THROTTLE_CHANNEL]);
-                
-                if (arm_ch < ARM_THRESHOLD_LOW) {
-                    armed = false;
-                } else if (!armed && arm_ch > ARM_THRESHOLD_HIGH) {
-                    if (throttle_ch >= THROTTLE_NEUTRAL_MIN && 
-                        throttle_ch <= THROTTLE_NEUTRAL_MAX) {
-                        armed = true;
-                    }
-                }
-            }
-            
-            /* Output logic - use ESC driver for motor */
-            if (armed) {
-                pwm_set_crsf(PWM_STEERING, crsf->channels[0]);
-                pwm_set_crsf(PWM_EBRAKE,   crsf->channels[3]);
-                esc_set_throttle_crsf(crsf->channels[2]);
-            } else {
-                pwm_set_pulse(PWM_STEERING, PWM_PULSE_CENTER);
-                pwm_set_pulse(PWM_EBRAKE,   PWM_PULSE_CENTER);
-                esc_set_throttle(ESC_THROTTLE_CENTER);
-            }
-            
-            /* Display current state */
-            usb_cdc_print("\r");
-            if (armed) {
-                usb_cdc_print("[ARMED]   ");
-            } else {
-                usb_cdc_print("[DISARMED]");
-            }
-            usb_cdc_print(" Steer:");
-            print_int(pwm_get_pulse(PWM_STEERING));
-            usb_cdc_print(" Motor:");
-            print_int(pwm_get_pulse(PWM_MOTOR));
-            usb_cdc_print(" Brake:");
-            print_int(pwm_get_pulse(PWM_EBRAKE));
-            usb_cdc_print(" LQ=");
-            print_int(crsf->link.uplink_link_quality);
-            usb_cdc_print("%    ");
-            
-            target_delay_ms(50);
+        monitor_mode = MONITOR_PASS;
+        monitor_last_ms = target_millis();
+    }
+    else if (strcmp(line, "stab on") == 0) {
+        stabilizer_set_mode(STAB_MODE_NORMAL);
+        usb_cdc_print("Stabilizer ENABLED (normal mode)\r\n");
+    }
+    else if (strcmp(line, "stab off") == 0) {
+        stabilizer_set_mode(STAB_MODE_OFF);
+        usb_cdc_print("Stabilizer DISABLED\r\n");
+    }
+    else if (strcmp(line, "stab") == 0) {
+        if (!imu_ok || !crsf_ok) {
+            usb_cdc_print("Error: IMU and CRSF must be initialized\r\n");
+            return;
         }
-        
-        usb_cdc_read_byte();
-        usb_cdc_print("\r\n");
+        usb_cdc_print("Stabilizer monitor (any key to exit):\r\n");
+        usb_cdc_print("  Gyro[yaw]  Speed   Steer   Correction  Error\r\n\r\n");
+        monitor_mode = MONITOR_STAB;
+        monitor_last_ms = target_millis();
     }
     else if (strcmp(line, "esc") == 0 || strncmp(line, "esc ", 4) == 0) {
         const char *arg = (strlen(line) > 4) ? line + 4 : NULL;
@@ -699,6 +822,7 @@ static void cli_process_line(const char *line)
     else if (strcmp(line, "motor_test") == 0) {
         motor_test_mode = !motor_test_mode;
         if (motor_test_mode) {
+            motor_test_start_ms = target_millis();
             usb_cdc_print("Motor test ENABLED - throttle unlocked\r\n");
             usb_cdc_print("WARNING: Motors can spin! Use 'motor_test' again to disable\r\n");
         } else {
@@ -760,15 +884,29 @@ void drivers_init(void)
 
 void flight_init(void)
 {
-    /* TODO: Initialize flight control
-     * - Gyro filtering
-     * - Stabilizer PID
-     * - Mixer
-     */
-}
+    /* Get configuration */
+    config_t *cfg = config_get();
 
-void config_init(void)
-{
-    /* TODO: Load configuration from EEPROM/flash */
-}
+    /* Initialize gyro filtering */
+    gyro_init(cfg->gyro_lpf_hz);
 
+    /* Initialize speed estimator */
+    speed_init(cfg->gear_ratio, cfg->tire_diameter_mm, cfg->motor_poles);
+
+    /* Initialize stabilizer with PID gains */
+    stab_gains_t gains = {
+        .kp = cfg->kp,
+        .ki = cfg->ki,
+        .kd = cfg->kd,
+        .yaw_rate_scale = cfg->yaw_rate_scale,
+        .max_correction = cfg->max_correction,
+    };
+    stabilizer_init(&gains);
+
+    /* Start disabled - gyro must be calibrated before stabilization.
+     * User enables via CLI or we could auto-enable after calibration. */
+    stabilizer_set_mode(STAB_MODE_OFF);
+
+    /* Initialize mixer */
+    mixer_init();
+}

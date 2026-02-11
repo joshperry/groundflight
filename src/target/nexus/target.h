@@ -204,4 +204,16 @@ void target_reboot_to_bootloader(void);
  */
 void check_bootloader_request(void);
 
+/**
+ * Initialize independent watchdog (~1 second timeout)
+ * Must call target_watchdog_feed() regularly or MCU resets
+ */
+void target_watchdog_init(void);
+
+/**
+ * Feed (kick) the watchdog timer to prevent reset
+ * Call this in the main loop
+ */
+void target_watchdog_feed(void);
+
 #endif /* TARGET_NEXUS_H */

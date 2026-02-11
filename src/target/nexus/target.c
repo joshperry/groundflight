@@ -12,6 +12,9 @@
 
 uint32_t SystemCoreClock = 16000000U;  /* Updated by clock config */
 
+/* APB prescaler table (required by HAL_RCC_GetPCLK1Freq / GetPCLK2Freq) */
+const uint8_t APBPrescTable[8] = {0, 0, 0, 0, 1, 2, 3, 4};
+
 static volatile uint32_t systick_ms = 0;
 
 /* ============================================================================
@@ -279,4 +282,28 @@ void SysTick_Handler(void)
 uint32_t HAL_GetTick(void)
 {
     return systick_ms;
+}
+
+/* ============================================================================
+ * Independent Watchdog (IWDG)
+ * ============================================================================ */
+
+static IWDG_HandleTypeDef hiwdg;
+
+void target_watchdog_init(void)
+{
+    /* IWDG clocked from LSI (32 kHz)
+     * Prescaler /32 = 1 kHz counter
+     * Reload 1000 = ~1 second timeout
+     */
+    hiwdg.Instance = IWDG;
+    hiwdg.Init.Prescaler = IWDG_PRESCALER_32;
+    hiwdg.Init.Reload = 1000;
+    hiwdg.Init.Window = IWDG_WINDOW_DISABLE;
+    HAL_IWDG_Init(&hiwdg);
+}
+
+void target_watchdog_feed(void)
+{
+    HAL_IWDG_Refresh(&hiwdg);
 }

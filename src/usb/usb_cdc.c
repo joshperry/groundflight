@@ -14,8 +14,9 @@
 /* USB Device handle */
 USBD_HandleTypeDef hUsbDeviceFS;
 
-/* TX state tracking */
-static volatile uint8_t tx_busy = 0;
+/* Static TX buffer - USB DMA reads from this after usb_cdc_send() returns */
+#define CDC_TX_BUF_SIZE 256
+static uint8_t tx_buf[CDC_TX_BUF_SIZE];
 
 /* External functions from usbd_cdc_if.c */
 extern uint16_t CDC_GetRxAvailable(void);
@@ -64,9 +65,14 @@ void usb_cdc_send(const uint8_t *data, uint16_t len)
     if (timeout == 0) {
         return;  /* Timeout, drop data */
     }
-    
-    /* Set TX buffer and transmit */
-    USBD_CDC_SetTxBuffer(&hUsbDeviceFS, (uint8_t *)data, len);
+
+    /* Copy into static buffer so DMA has a stable source after we return */
+    if (len > CDC_TX_BUF_SIZE) {
+        len = CDC_TX_BUF_SIZE;
+    }
+    memcpy(tx_buf, data, len);
+
+    USBD_CDC_SetTxBuffer(&hUsbDeviceFS, tx_buf, len);
     USBD_CDC_TransmitPacket(&hUsbDeviceFS);
 }
 

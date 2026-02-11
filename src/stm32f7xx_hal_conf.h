@@ -29,6 +29,8 @@ extern "C" {
 #define HAL_TIM_MODULE_ENABLED
 #define HAL_UART_MODULE_ENABLED
 
+#define HAL_IWDG_MODULE_ENABLED
+
 /* Disabled modules (uncomment to enable)
 #define HAL_ADC_MODULE_ENABLED
 #define HAL_CAN_MODULE_ENABLED
@@ -45,7 +47,6 @@ extern "C" {
 #define HAL_I2C_MODULE_ENABLED
 #define HAL_I2S_MODULE_ENABLED
 #define HAL_IRDA_MODULE_ENABLED
-#define HAL_IWDG_MODULE_ENABLED
 #define HAL_LPTIM_MODULE_ENABLED
 #define HAL_LTDC_MODULE_ENABLED
 #define HAL_MDIOS_MODULE_ENABLED
@@ -240,10 +241,6 @@ extern "C" {
 
 #ifdef HAL_NOR_MODULE_ENABLED
 #include "stm32f7xx_hal_nor.h"
-#endif
-
-#ifdef HAL_PCD_MODULE_ENABLED
-#include "stm32f7xx_hal_pcd.h"
 #endif
 
 #ifdef HAL_PCD_MODULE_ENABLED
