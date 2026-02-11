@@ -16,7 +16,7 @@ static const config_t DEFAULT_CONFIG = {
     .gyro_lpf_hz = 50,              /* 50Hz low-pass filter */
 
     /* Stabilizer PID - MVP: P-only, conservative gain */
-    .kp = 0.3f,                     /* Start conservative, tune up as needed */
+    .kp = 0.003f,                   /* Correction per deg/s error (0.003 = 50% at 167 dps) */
     .ki = 0.0f,                     /* Disabled for MVP */
     .kd = 0.0f,                     /* Disabled for MVP */
     .yaw_rate_scale = 400.0f,       /* Full stick = 400 deg/s expected yaw rate */

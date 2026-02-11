@@ -140,10 +140,11 @@ int main(void)
     /* Initialize USB CDC for CLI */
     usb_cdc_init();
     
-    /* Initialize subsystems */
+    /* Initialize subsystems
+     * Config must load before flight_init reads gains */
+    config_init();
     drivers_init();
     flight_init();
-    config_init();
 
     /* Enable stabilizer if gyro was calibrated on boot */
     if (imu_ok) {
