@@ -7,6 +7,7 @@
  *   USART1 - ESC telemetry, half-duplex on PB6 (AF7) @ 115200
  *            Single-wire bidirectional for SRXL2 protocol
  *   UART4  - CRSF receiver (PA0=RX, PA1=TX, AF8) @ 420000
+ *   USART6 - MSP OSD (PC6=RX, PC7=TX, AF8) @ 115200
  */
 
 #include "uart.h"
@@ -34,6 +35,10 @@ static UART_HandleTypeDef huart4;
 static ring_buffer_t uart4_rx_buf;
 static bool uart4_initialized = false;
 
+/* USART6 - MSP OSD */
+static UART_HandleTypeDef huart6;
+static bool uart6_initialized = false;
+
 /* RX byte counters (for debugging) */
 volatile uint32_t uart1_rx_count = 0;
 volatile uint32_t uart4_rx_count = 0;
@@ -42,6 +47,7 @@ volatile uint32_t uart4_rx_count = 0;
 static bool uart1_init_halfduplex(uint32_t baudrate);
 static void uart1_deinit(void);
 static bool uart4_init(uint32_t baudrate);
+static bool uart6_init(uint32_t baudrate);
 
 /* ============================================================================
  * Public API
@@ -55,8 +61,7 @@ bool uart_init(uart_port_t port, uint32_t baudrate)
         case UART_ESC:
             return uart1_init_halfduplex(baudrate);
         case UART_AUX:
-            /* TODO: UART6 spare */
-            return false;
+            return uart6_init(baudrate);
         default:
             return false;
     }
@@ -144,10 +149,14 @@ void uart_send(uart_port_t port, const uint8_t *data, uint16_t len)
             if (!uart1_initialized) return;
             huart = &huart1;
             break;
+        case UART_AUX:
+            if (!uart6_initialized) return;
+            huart = &huart6;
+            break;
         default:
             return;
     }
-    
+
     /* For half-duplex (USART1), HAL handles direction automatically */
     HAL_UART_Transmit(huart, (uint8_t *)data, len, 100);
     
@@ -423,4 +432,46 @@ void UART4_IRQHandler(void)
     if (__HAL_UART_GET_FLAG(&huart4, UART_FLAG_NE)) {
         __HAL_UART_CLEAR_NEFLAG(&huart4);
     }
+}
+
+/* ============================================================================
+ * USART6 - MSP OSD (Port B)
+ * Pins: PC7 = TX, PC6 = RX (AF8)
+ * TX-only for DisplayPort OSD, RX enabled but unused
+ * ============================================================================ */
+
+static bool uart6_init(uint32_t baudrate)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    /* Enable clocks */
+    __HAL_RCC_USART6_CLK_ENABLE();
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+
+    /* Configure GPIO: PC6 (RX), PC7 (TX) */
+    GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF8_USART6;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    /* Configure USART6 */
+    huart6.Instance = USART6;
+    huart6.Init.BaudRate = baudrate;
+    huart6.Init.WordLength = UART_WORDLENGTH_8B;
+    huart6.Init.StopBits = UART_STOPBITS_1;
+    huart6.Init.Parity = UART_PARITY_NONE;
+    huart6.Init.Mode = UART_MODE_TX_RX;
+    huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart6.Init.OverSampling = UART_OVERSAMPLING_16;
+    huart6.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+    huart6.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+
+    if (HAL_UART_Init(&huart6) != HAL_OK) {
+        return false;
+    }
+
+    uart6_initialized = true;
+    return true;
 }

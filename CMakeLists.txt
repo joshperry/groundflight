@@ -65,6 +65,7 @@ set(SOURCES
     src/drivers/pwm.c
     src/drivers/uart.c
     src/drivers/spi.c
+    src/drivers/msp.c
 
     # USB CDC
     src/usb/usb_cdc.c
@@ -77,6 +78,7 @@ set(SOURCES
     src/flight/speed.c
     src/flight/mixer.c
     src/flight/stabilizer.c
+    src/flight/osd.c
 
     # Configuration
     src/config/config.c

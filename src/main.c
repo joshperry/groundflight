@@ -16,6 +16,7 @@
 #include "speed.h"
 #include "stabilizer.h"
 #include "mixer.h"
+#include "osd.h"
 #include <string.h>
 
 /* Forward declarations */
@@ -150,6 +151,9 @@ int main(void)
     if (imu_ok) {
         stabilizer_set_mode(STAB_MODE_NORMAL);
     }
+
+    /* Initialize MSP OSD on UART6 (Port B) */
+    osd_init();
 
     /* Start watchdog last - everything must be initialized first */
     target_watchdog_init();
@@ -315,6 +319,10 @@ int main(void)
         if (esc_ok) {
             esc_process();
         }
+
+        /* Update OSD */
+        osd_set_armed(armed);
+        osd_update(now);
     }
     
     return 0;
