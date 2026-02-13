@@ -949,6 +949,9 @@ void flight_init(void)
         .kd = cfg->kd,
         .yaw_rate_scale = cfg->yaw_rate_scale,
         .max_correction = cfg->max_correction,
+        .low_speed_gain = cfg->low_speed_gain,
+        .high_speed_gain = cfg->high_speed_gain,
+        .speed_gain_max_mph = cfg->speed_gain_max_mph,
     };
     stabilizer_init(&gains);
 

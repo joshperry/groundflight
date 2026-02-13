@@ -18,14 +18,14 @@ static const config_t DEFAULT_CONFIG = {
     /* Stabilizer PID - MVP: P-only, conservative gain */
     .kp = 0.003f,                   /* Correction per deg/s error (0.003 = 50% at 167 dps) */
     .ki = 0.0f,                     /* Disabled for MVP */
-    .kd = 0.0f,                     /* Disabled for MVP */
+    .kd = 0.0001f,                   /* Derivative gain for oscillation damping */
     .yaw_rate_scale = 400.0f,       /* Full stick = 400 deg/s expected yaw rate */
     .max_correction = 0.5f,         /* Limit correction to ±50% of servo range */
 
-    /* Speed-based gain scheduling (not used in MVP, placeholder) */
-    .low_speed_gain = 1.0f,
-    .high_speed_gain = 1.0f,
-    .speed_gain_max_mph = 40.0f,
+    /* Speed-based gain scheduling */
+    .low_speed_gain = 1.0f,             /* Full gain at standstill */
+    .high_speed_gain = 0.3f,            /* 30% gain at max speed */
+    .speed_gain_max_mph = 60.0f,        /* Gain fully reduced by 60mph */
 
     /* Brake-aware gain (not used in MVP, placeholder) */
     .brake_gain_max = 1.0f,

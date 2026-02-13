@@ -3,10 +3,11 @@
  *
  * Core control algorithm for car stability
  *
- * Algorithm (MVP P-only):
+ * Algorithm:
  *   expected_yaw_rate = steer_cmd * yaw_rate_scale
  *   error = expected_yaw_rate - gyro_yaw
- *   correction = Kp * error * gain_knob
+ *   speed_gain = lerp(low_speed_gain, high_speed_gain, speed / max_speed)
+ *   correction = (Kp * error + Kd * d_error) * gain_knob * speed_gain
  *   servo_out = steer_cmd + correction (mixer handles this)
  */
 
@@ -21,6 +22,7 @@ static stab_mode_t g_mode = STAB_MODE_OFF;
 /* Last correction output (for debugging/telemetry) */
 static float g_last_correction = 0.0f;
 static float g_last_error = 0.0f;
+static float g_prev_error = 0.0f;
 
 /**
  * Initialize stabilizer
@@ -51,6 +53,7 @@ void stabilizer_set_mode(stab_mode_t mode)
     if (mode == STAB_MODE_OFF) {
         g_last_correction = 0.0f;
         g_last_error = 0.0f;
+        g_prev_error = 0.0f;
     }
 }
 
@@ -59,8 +62,8 @@ void stabilizer_set_mode(stab_mode_t mode)
  *
  * @param steer_cmd Steering command from receiver (-1.0 to 1.0)
  * @param gyro_yaw Current yaw rate from gyro (deg/s)
- * @param speed_mph Current vehicle speed in mph (unused in MVP)
- * @param throttle Throttle position (-1.0 to 1.0, unused in MVP)
+ * @param speed_mph Current vehicle speed in mph (for gain scheduling)
+ * @param throttle Throttle position (-1.0 to 1.0, unused)
  * @param gain_knob Gain adjustment knob (0.0 to 1.0, 1.0 = full gain)
  *
  * @return Steering correction to add to steer_cmd (-1.0 to 1.0)
@@ -72,6 +75,7 @@ float stabilizer_update(float steer_cmd, float gyro_yaw, float speed_mph,
     if (g_mode == STAB_MODE_OFF) {
         g_last_correction = 0.0f;
         g_last_error = 0.0f;
+        g_prev_error = 0.0f;
         return 0.0f;
     }
 
@@ -94,12 +98,33 @@ float stabilizer_update(float steer_cmd, float gyro_yaw, float speed_mph,
      */
     float error = expected_yaw_rate - gyro_yaw;
 
-    /* Apply proportional gain
+    /* PD controller
      *
-     * For MVP: Simple P-only controller
-     * correction = Kp * error
+     * P term: corrects current error
+     * D term: opposes rapid changes in error (dampens oscillation)
+     *
+     * At 1kHz loop rate, d_error is in deg/s per tick.
+     * Kd should be tuned accordingly (small values, e.g. 0.0001).
      */
-    float correction = g_gains.kp * error;
+    float d_error = error - g_prev_error;
+    g_prev_error = error;
+
+    float correction = g_gains.kp * error + g_gains.kd * d_error;
+
+    /* Apply speed-based gain scheduling
+     *
+     * Linearly interpolate between low_speed_gain and high_speed_gain
+     * based on vehicle speed. When speed_mph is 0 (no telemetry),
+     * t = 0 and gain = low_speed_gain (default 1.0), so behavior
+     * is unchanged from a fixed-gain controller.
+     */
+    float t = 0.0f;
+    if (g_gains.speed_gain_max_mph > 0.0f) {
+        t = speed_mph / g_gains.speed_gain_max_mph;
+        if (t > 1.0f) t = 1.0f;
+    }
+    float speed_gain = g_gains.low_speed_gain + t * (g_gains.high_speed_gain - g_gains.low_speed_gain);
+    correction *= speed_gain;
 
     /* Apply gain knob (user-adjustable trim)
      *

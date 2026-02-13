@@ -20,6 +20,9 @@ typedef struct {
     float kd;
     float yaw_rate_scale;
     float max_correction;
+    float low_speed_gain;
+    float high_speed_gain;
+    float speed_gain_max_mph;
 } stab_gains_t;
 
 void stabilizer_init(const stab_gains_t *gains);
