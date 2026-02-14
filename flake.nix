@@ -216,6 +216,11 @@
           echo "Build directory cleaned"
         '';
 
+        # Helper: Run host-side tests
+        gf-test = pkgs.writeShellScriptBin "gf-test" ''
+          cd test && cmake -B build -G Ninja && ninja -C build && ctest --test-dir build --output-on-failure
+        '';
+
       in {
         devShells.default = pkgs.mkShell {
           packages = [
@@ -249,6 +254,7 @@
             gf-cli
             gf-reset
             gf-clean
+            gf-test
 
             # Logic analyzer (helpful for CRSF/SRXL2 debugging)
             pkgs.sigrok-cli
@@ -273,6 +279,7 @@
             echo "    gf-build [Release|Debug]    Configure & build"
             echo "    gf-upload [file.bin]        Build, reboot to DFU, flash (one shot)"
             echo "    gf-clean                    Clean build directory"
+            echo "    gf-test                     Run host-side unit tests"
             echo ""
             echo "  Flash (manual)"
             echo "    gf-dfu [file.bin]           Flash via USB DFU"
