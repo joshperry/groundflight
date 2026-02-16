@@ -2,7 +2,9 @@
  * Integration test: failsafe behavior
  *
  * Verifies that link loss / disarmed state results in safe outputs.
- * The key safety invariant: all outputs = 1500us (neutral) when disarmed.
+ * Safety invariants:
+ *   - Steering and motor go to 1500us (neutral)
+ *   - E-brake goes to 2000us (fully applied)
  */
 
 #include "unity.h"
@@ -16,7 +18,7 @@
 static void apply_disarmed_outputs(void)
 {
     pwm_set_pulse(PWM_STEERING, PWM_PULSE_CENTER);
-    pwm_set_pulse(PWM_EBRAKE, PWM_PULSE_CENTER);
+    pwm_set_pulse(PWM_EBRAKE, PWM_PULSE_MAX);  /* E-brake fully applied */
     pwm_set_pulse(PWM_MOTOR, PWM_PULSE_CENTER);
 }
 
@@ -59,34 +61,34 @@ void tearDown(void) {}
 
 /* ---- Core safety invariant ---- */
 
-void test_disarmed_outputs_all_center(void)
+void test_disarmed_outputs_safe(void)
 {
     apply_disarmed_outputs();
 
     TEST_ASSERT_EQUAL_UINT16(1500, pwm_get_pulse(PWM_STEERING));
-    TEST_ASSERT_EQUAL_UINT16(1500, pwm_get_pulse(PWM_EBRAKE));
+    TEST_ASSERT_EQUAL_UINT16(2000, pwm_get_pulse(PWM_EBRAKE));
     TEST_ASSERT_EQUAL_UINT16(1500, pwm_get_pulse(PWM_MOTOR));
 }
 
 /* ---- Transition from armed to disarmed ---- */
 
-void test_arm_then_disarm_goes_neutral(void)
+void test_arm_then_disarm_goes_safe(void)
 {
     /* Simulate armed state with right steering and forward throttle */
     for (int i = 0; i < 10; i++) {
         apply_armed_outputs(CRSF_CHANNEL_MAX, 1600);
     }
 
-    /* Verify outputs are NOT center while armed */
+    /* Verify outputs are NOT at failsafe while armed */
     uint16_t steer_armed = pwm_get_pulse(PWM_STEERING);
     TEST_ASSERT_TRUE(steer_armed > 1600);
 
     /* Now disarm (failsafe / link loss) */
     apply_disarmed_outputs();
 
-    /* Everything must return to center */
+    /* Steering and motor neutral, e-brake applied */
     TEST_ASSERT_EQUAL_UINT16(1500, pwm_get_pulse(PWM_STEERING));
-    TEST_ASSERT_EQUAL_UINT16(1500, pwm_get_pulse(PWM_EBRAKE));
+    TEST_ASSERT_EQUAL_UINT16(2000, pwm_get_pulse(PWM_EBRAKE));
     TEST_ASSERT_EQUAL_UINT16(1500, pwm_get_pulse(PWM_MOTOR));
 }
 
@@ -106,6 +108,19 @@ void test_car_esc_neutral_is_1500_not_1000(void)
     uint16_t motor = pwm_get_pulse(PWM_MOTOR);
     TEST_ASSERT_EQUAL_UINT16(1500, motor);
     TEST_ASSERT_TRUE(motor != 1000);
+}
+
+/* ---- E-brake applied on failsafe ---- */
+
+void test_ebrake_applied_on_failsafe(void)
+{
+    /* E-brake released while driving */
+    pwm_set_pulse(PWM_EBRAKE, 1000);
+    TEST_ASSERT_EQUAL_UINT16(1000, pwm_get_pulse(PWM_EBRAKE));
+
+    /* Disarm -> e-brake fully applied */
+    apply_disarmed_outputs();
+    TEST_ASSERT_EQUAL_UINT16(2000, pwm_get_pulse(PWM_EBRAKE));
 }
 
 /* ---- Disarm during full throttle ---- */
@@ -152,7 +167,7 @@ void test_disarm_idempotent(void)
     apply_disarmed_outputs();
 
     TEST_ASSERT_EQUAL_UINT16(1500, pwm_get_pulse(PWM_STEERING));
-    TEST_ASSERT_EQUAL_UINT16(1500, pwm_get_pulse(PWM_EBRAKE));
+    TEST_ASSERT_EQUAL_UINT16(2000, pwm_get_pulse(PWM_EBRAKE));
     TEST_ASSERT_EQUAL_UINT16(1500, pwm_get_pulse(PWM_MOTOR));
 }
 
@@ -162,9 +177,10 @@ int main(void)
 {
     UNITY_BEGIN();
 
-    RUN_TEST(test_disarmed_outputs_all_center);
-    RUN_TEST(test_arm_then_disarm_goes_neutral);
+    RUN_TEST(test_disarmed_outputs_safe);
+    RUN_TEST(test_arm_then_disarm_goes_safe);
     RUN_TEST(test_car_esc_neutral_is_1500_not_1000);
+    RUN_TEST(test_ebrake_applied_on_failsafe);
     RUN_TEST(test_disarm_during_full_throttle);
     RUN_TEST(test_disarm_during_reverse);
     RUN_TEST(test_disarm_during_full_steering);

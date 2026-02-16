@@ -308,7 +308,7 @@ int main(void)
             } else {
                 /* Disarmed = failsafe = outputs neutral */
                 pwm_set_pulse(PWM_STEERING, PWM_PULSE_CENTER);
-                pwm_set_pulse(PWM_EBRAKE,   PWM_PULSE_CENTER);
+                pwm_set_pulse(PWM_EBRAKE,   PWM_PULSE_MAX);
                 if(!motor_test_mode) {
                     esc_set_throttle(ESC_THROTTLE_CENTER);
                 }
