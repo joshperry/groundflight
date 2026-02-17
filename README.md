@@ -8,7 +8,10 @@ That can be fixed by looking to the open hardware/software space of fixed-wing, 
 
 We're going to start with a really great flight controller in the RadioMaster Nexus, and we'll teach it instead how to do the somewhat simpler land vehicle control and stabilization task.
 
-**Status:** Passthrough with ARM + SRXL2 Telemetry — Blink ✅ | USB CLI ✅ | IMU ✅ | CRSF ✅ | PWM ✅ | ARM ✅ | SRXL2 ✅ | Stabilizer 🔲
+**Status:** Stabilizer implemented, tuning on-car — Blink ✅ | USB CLI ✅ | IMU ✅ | CRSF ✅ | PWM ✅ | ARM ✅ | SRXL2 ✅ | Stabilizer ✅ | MSP OSD ✅ | Host Tests ✅
+
+**2/14**
+PD stabilizer with speed-based gain scheduling is implemented and on the car. MSP DisplayPort OSD driver implemented on UART6 (Port B) for DJI/HDZero goggles. Full host-side test suite (91 assertions across 9 test suites) validates all flight logic without hardware. E-brake now applies on failsafe instead of going to neutral.
 
 **1/24**
 Initial field tests have already progressed successfully, and after a small fix in the failsafe code going into reverse on power loss, we have settled into a stable configuration for the system.
@@ -115,6 +118,7 @@ This provides: ARM toolchain, CMake, dfu-util, picocom, and STM32CubeF7 HAL.
 ```bash
 gf-build          # Configure and build (Debug)
 gf-build Release  # Build with optimizations
+gf-test           # Run host-side unit and integration tests
 ```
 
 ### Flash
@@ -159,17 +163,23 @@ gf-monitor   # USB serial monitor (Ctrl-C to exit)
 ```
 > help
 Commands:
-  help      - This help
-  status    - Show system status
-  version   - Show firmware version
-  gyro      - Show live gyro data (any key to stop)
-  gyroraw   - Show raw gyro values
-  cal       - Calibrate gyro (keep device still!)
-  crsf      - Show live CRSF channel data
-  servo N P - Set servo N (0-4) to pulse P (1000-2000)
-  pass      - Monitor passthrough and arm state
-  dfu       - Reboot to DFU bootloader
-  reboot    - Reboot system
+  help        - This help
+  status      - Show system status
+  version     - Show firmware version
+  gyro        - Show live gyro data (any key to stop)
+  gyroraw     - Show raw gyro values
+  cal         - Calibrate gyro (keep device still!)
+  crsf        - Show live CRSF channel data
+  servo N P   - Set servo N (0-4) to pulse P (1000-2000)
+  pass        - Monitor passthrough and arm state
+  stab        - Monitor stabilizer output (correction, gains)
+  stab on/off - Enable/disable stabilizer
+  esc         - Show SRXL2 status and telemetry
+  esc pwm     - Switch to PWM mode (no telemetry)
+  esc srxl2   - Switch to SRXL2 mode
+  motor_test  - Enable direct throttle control (bypasses ARM)
+  dfu         - Reboot to DFU bootloader
+  reboot      - Reboot system
 ```
 
 ### Example Session
@@ -231,21 +241,32 @@ The car will not respond to controls until armed. This prevents:
 - Flip CH5 switch low (<1300µs)
 - Signal loss (CRSF failsafe)
 
-**When disarmed:** All outputs locked to neutral (1500µs). This IS the failsafe state — there's no separate failsafe behavior.
+**When disarmed:**
+- Steering and motor locked to neutral (1500µs)
+- E-brake fully applied (2000µs) — servo endpoint tuning controls actual braking pressure
+- This IS the failsafe state — there's no separate failsafe behavior
 
-### Passthrough Mode (Current)
+### Passthrough Mode
 
-When armed, CRSF channels map directly to PWM outputs:
+When armed with stabilizer off, CRSF channels map directly to PWM outputs:
 - CH1 → Steering servo (S1)
 - CH3 → Motor ESC (ESC header)
 - CH4 → E-brake servo (S3)
 
-### Stabilized Mode (Coming Soon)
+### Stabilized Mode
 
-Gyro feedback applied to steering:
+PD controller applies yaw rate correction to steering. The stabilizer compares the expected yaw rate (from steering input) against the actual yaw rate (from the IMU gyro Z axis) and adds a correction to the steering output.
+
 ```
-steering_out = steering_in + (gyro_yaw * gain)
+expected_yaw = steer_cmd * yaw_rate_scale     (e.g. 400 deg/s at full stick)
+error = expected_yaw - gyro_yaw
+correction = Kp * error + Kd * d_error
+steering_out = steer_cmd + correction * speed_gain * gain_knob
 ```
+
+**Speed-based gain scheduling:** At higher speeds the correction is reduced to prevent overcorrection. Linearly interpolates from `low_speed_gain` (1.0 at 0 mph) to `high_speed_gain` (0.3 at 60 mph).
+
+**Gain knob:** An aux channel (0.0-1.0) scales the entire correction, allowing real-time tuning from the transmitter.
 
 ## Development Milestones
 
@@ -259,13 +280,14 @@ steering_out = steering_in + (gyro_yaw * gain)
 | 6 | E-brake passthrough | ✅ | CH4 → S3 |
 | 7 | ESC throttle | ✅ | CH3 → ESC header |
 | 8 | ARM interlock | ✅ | CH5, throttle-neutral-to-arm |
-| 9 | **Stabilizer** | 🔲 | P controller on yaw rate |
-| 10 | Brake-aware | 🔲 | Reduce gain during braking |
-| 11 | Tuning | 🔲 | Gain knob via aux channel, CLI params |
-| 12 | Config save | 🔲 | Persist to flash |
+| 9 | Stabilizer | ✅ | PD controller with speed-based gain scheduling |
+| 10 | Brake-aware | 🔲 | Increase gain during braking (rear gets light) |
+| 11 | Tuning | 🔲 | Gain knob via aux channel, CLI `set`/`get` params |
+| 12 | Config save | 🔲 | Persist to EEPROM/flash |
 | 13 | ESC telemetry | ✅ | SRXL2: voltage, current, temp working; RPM needs ESC config |
-| 14 | MSP protocol | 🔲 | DVR arm signal, OSD |
-| 15 | HIL testing | 🔲 | Automated safety regression |
+| 14 | MSP protocol | ✅ | DisplayPort OSD on UART6 (Port B) |
+| 15 | Host tests | ✅ | 91 assertions across 9 suites (Unity framework) |
+| 16 | HIL testing | 🔲 | Automated safety regression with real hardware |
 
 ## Architecture
 
@@ -280,31 +302,34 @@ steering_out = steering_in + (gyro_yaw * gain)
         └─────────────┘      │             │     │  (servos)   │
                              └──────┬──────┘     └─────────────┘
                                     │
-                                    │ correction (when stabilizer enabled)
+                                    │ correction
                              ┌──────┴──────┐
-                             │ Stabilizer  │◀──── Gyro Z (yaw rate)
-                             │  (PI/PID)   │
+                             │ Stabilizer  │◀──── Gyro Z (yaw rate, Butterworth LPF)
+                             │   (PD)      │
                              └──────┬──────┘
                                     │
                              ┌──────┴──────┐
-                             │ Speed Est.  │◀──── ESC telemetry (RPM)
+                             │ Speed Est.  │◀──── ESC telemetry (RPM via SRXL2)
                              │ (gain sched)│
                              └─────────────┘
 ```
 
-The stabilizer will apply yaw correction to steering based on gyro rate. At higher speeds (from ESC telemetry), correction gain is reduced to prevent overcorrection.
+The stabilizer applies yaw rate correction to steering based on gyro feedback. At higher speeds (from ESC RPM telemetry), correction gain is reduced to prevent overcorrection. The mixer combines driver input with stabilizer correction and clamps the output.
 
 ## Safety
 
 See [TESTING.md](TESTING.md) for the full testing strategy.
 
 **Key safety properties:**
-- Outputs are neutral (1500µs) until explicitly armed
+- Steering and motor outputs are neutral (1500µs) until explicitly armed
+- E-brake is fully applied (2000µs) when disarmed — actual braking force set by servo endpoint tuning
 - Disarm is immediate and unconditional
 - Signal loss = automatic disarm
 - ARM requires throttle at neutral (prevents arming while throttle is up)
 
-**Learned the hard way:** Car ESCs use 1500µs as neutral, not 1000µs. An early bug set failsafe to 1000µs (full reverse). This is why we need hardware-in-loop testing — you can't unit test your assumptions.
+**Lessons learned:**
+- Car ESCs use 1500µs as neutral, not 1000µs. An early bug set failsafe to 1000µs (full reverse on power loss). This is why we need hardware-in-loop testing — you can't unit test your assumptions.
+- E-brake should be applied (not neutral) on failsafe. Braking pressure is tuned at the servo endpoint so firmware always sends max and the hardware determines actual force. This avoids needing firmware changes as brake shoes wear.
 
 ## Tested Hardware
 
@@ -320,7 +345,7 @@ See [TESTING.md](TESTING.md) for the full testing strategy.
 ```
 groundflight/
 ├── flake.nix              # Nix dev environment & STM32CubeF7
-├── CMakeLists.txt         # Build configuration
+├── CMakeLists.txt         # ARM cross-compilation build
 ├── TESTING.md             # Test strategy documentation
 ├── cmake/
 │   └── arm-none-eabi.cmake
@@ -330,29 +355,80 @@ groundflight/
 │   └── startup_stm32f722xx.s
 ├── lib/
 │   └── stubs/             # Minimal stubs for non-Nix builds
-└── src/
-    ├── main.c             # Main loop, CLI, ARM logic
-    ├── stm32f7xx_hal_conf.h
-    ├── drivers/
-    │   ├── icm42688.c/h   # IMU driver
-    │   ├── crsf.c/h       # CRSF protocol parser
-    │   ├── uart.c/h       # Interrupt-driven UART
-    │   ├── pwm.c/h        # Servo PWM output
-    │   ├── spi.c/h        # SPI bus driver
-    │   ├── esc.c/h        # ESC abstraction (PWM or SRXL2)
-    │   └── srxl2.c/h      # SRXL2 protocol driver
-    ├── flight/
-    │   ├── stabilizer.c/h # Yaw stabilization (stub)
-    │   ├── mixer.c/h      # Channel mixing (stub)
-    │   └── gyro.c/h       # Gyro processing (stub)
-    ├── config/
-    │   └── *.c/h          # Configuration (stub)
-    ├── usb/
-    │   └── *.c/h          # USB CDC implementation
-    └── target/nexus/
-        ├── target.c       # Clock init, DFU, LED
-        └── target.h
+├── src/
+│   ├── main.c             # Main loop, CLI, ARM logic
+│   ├── stm32f7xx_hal_conf.h
+│   ├── drivers/
+│   │   ├── icm42688.c/h   # IMU driver (SPI, ±2000°/s)
+│   │   ├── crsf.c/h       # CRSF protocol parser
+│   │   ├── uart.c/h       # Interrupt-driven UART
+│   │   ├── pwm.c/h        # Servo PWM output
+│   │   ├── spi.c/h        # SPI bus driver
+│   │   ├── esc.c/h        # ESC abstraction (PWM or SRXL2)
+│   │   ├── srxl2.c/h      # SRXL2 protocol driver
+│   │   └── msp.c/h        # MSP v1 DisplayPort OSD
+│   ├── flight/
+│   │   ├── stabilizer.c/h # PD yaw stabilizer + speed gain scheduling
+│   │   ├── mixer.c/h      # Input mixing + correction application
+│   │   ├── gyro.c/h       # 2nd-order Butterworth LPF
+│   │   ├── speed.c/h      # RPM → mph conversion
+│   │   └── osd.c/h        # OSD screen layout
+│   ├── config/
+│   │   ├── config.c/h     # Runtime configuration + defaults
+│   │   ├── cli.c/h        # Serial CLI
+│   │   └── eeprom.c/h     # Config persistence (stub)
+│   ├── usb/
+│   │   └── *.c/h          # USB CDC implementation
+│   └── target/nexus/
+│       ├── target.c       # Clock init, DFU, LED
+│       └── target.h
+└── test/
+    ├── CMakeLists.txt     # Host-gcc test build (separate from ARM)
+    ├── unity/             # Vendored Unity v2.6.0 test framework
+    ├── mocks/
+    │   ├── mock_hal.h     # Stub HAL types
+    │   ├── mock_uart.c/h  # Captures UART output per port
+    │   ├── mock_pwm.c/h   # Captures PWM pulse widths
+    │   └── mock_eeprom.c/h# In-memory config storage
+    ├── unit/
+    │   ├── test_stabilizer.c  # PD output, gain scheduling, mode transitions
+    │   ├── test_mixer.c       # Correction mixing, clamping, passthrough
+    │   ├── test_speed.c       # RPM→mph conversion, edge cases
+    │   ├── test_gyro.c        # LPF convergence, calibration
+    │   ├── test_config.c      # Defaults, mutation, reset
+    │   ├── test_crsf.c        # Channel conversions, boundary values
+    │   └── test_msp.c         # Frame encoding, CRC, DisplayPort
+    └── integration/
+        ├── test_signal_chain.c  # Full CRSF→stabilizer→mixer→PWM pipeline
+        └── test_failsafe.c      # Disarm safety, e-brake application
 ```
+
+## Testing
+
+### Host-Side Tests
+
+Pure-logic modules (stabilizer, mixer, speed, gyro, config, crsf, msp) have zero HAL dependencies and compile with host `gcc`. Run all tests with:
+
+```bash
+gf-test    # cmake + ninja + ctest, output on failure
+```
+
+**9 test suites, 91 assertions** covering:
+- **Stabilizer:** PD output with known inputs, speed-based gain scheduling interpolation (0/30/60/>60 mph), gain knob scaling and clamping, mode transitions (OFF resets derivative state), max correction clamping
+- **Mixer:** Passthrough with zero correction, correction adds to steering within [-1,1], throttle/ebrake unmodified
+- **Speed:** RPM-to-mph conversion chain (electrical RPM → mechanical → wheel → m/s → mph), gear ratio and tire diameter
+- **Gyro:** Butterworth LPF convergence, high-frequency rejection, calibration offset, axis independence
+- **Config:** Default values, mutation, reset to defaults
+- **CRSF:** `crsf_to_float()` boundary values (172=-1.0, 992=0.0, 1811=1.0), `crsf_to_us()` mapping, monotonicity
+- **MSP:** Frame header/length/CRC encoding, DisplayPort sub-commands
+- **Signal chain (integration):** Full CRSF→gyro→stabilizer→mixer→PWM pipeline, oversteer/understeer correction direction
+- **Failsafe (integration):** Disarmed outputs safe, arm/disarm transitions, e-brake applied, ESC neutral is 1500 not 1000
+
+Key testing insight: `stabilizer_init()` does NOT reset derivative state. Only `stabilizer_set_mode(STAB_MODE_OFF)` clears `prev_error`. Tests use a reset helper that toggles through OFF mode between tests.
+
+### Hardware-in-Loop Tests
+
+See [TESTING.md](TESTING.md) for the tiered hardware testing strategy (PWM capture, ESC-in-loop, full system with tachometer). Not yet automated.
 
 ## Technical Notes
 
@@ -413,14 +489,7 @@ SRXL2 is Spektrum's bidirectional serial protocol for Smart ESCs, receivers, and
 - Car ESC reverse: Requires double-tap (brake → neutral → reverse)
 - RPM telemetry: May read 0 until motor pole count configured in ESC
 
-**CLI Commands:**
-```
-> esc              # Show SRXL2 status and telemetry
-> esc pwm          # Switch to PWM mode (no telemetry)
-> esc srxl2        # Switch to SRXL2 mode
-> motor_test       # Enable direct throttle control (bypasses ARM)
-> throttle <val>   # Set throttle (1000-2000 mapped to SRXL2 range)
-```
+**CLI Commands:** `esc` (show status), `esc pwm` / `esc srxl2` (switch mode), `motor_test` (bypass ARM for bench testing).
 
 ### Car ESC Neutral
 
@@ -429,7 +498,7 @@ SRXL2 is Spektrum's bidirectional serial protocol for Smart ESCs, receivers, and
 - 1500µs = stopped
 - 2000µs = full forward
 
-All safe/failsafe/disarmed states must output 1500µs to the ESC.
+Failsafe/disarmed: motor output = 1500µs (neutral), e-brake output = 2000µs (applied).
 
 ### HAL Dependencies
 

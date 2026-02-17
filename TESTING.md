@@ -33,22 +33,24 @@ This principle drives our tiered testing approach.
 **Runs:** On every commit, in CI  
 **Hardware:** None (host machine)
 
-What we test:
-- CRSF frame parsing and CRC validation
-- Channel unpacking math (11-bit packed → 16-bit values)
-- PWM pulse width calculations
-- Stabilizer P/I/D math
-- Configuration serialization
+What we test (91 assertions, 9 suites):
+- CRSF channel conversions (`crsf_to_float`, `crsf_to_us`) and boundary values
+- PD stabilizer math, gain scheduling interpolation, mode transitions, gain knob clamping
+- Mixer correction application and output clamping
+- Speed estimation (RPM → mph conversion chain)
+- Gyro Butterworth LPF convergence and calibration
+- Config defaults and reset behavior
+- MSP v1 frame encoding and CRC
+- Full signal chain (CRSF → stabilizer → mixer → PWM)
+- Failsafe safety invariants (steering/motor neutral, e-brake applied)
 
 What we DON'T test:
-- Anything involving "safe" values or defaults (those need hardware verification)
-- Timing-critical behavior
+- Anything involving real hardware timing
 - Interrupt handling
+- Actual PWM waveforms (needs Tier 2)
 
 ```bash
-# Future: run unit tests
-cd groundflight
-make test-unit
+gf-test    # Runs all host-side tests
 ```
 
 ### Tier 2: Hardware-in-Loop (Nexus + Logic Analyzer)
@@ -261,12 +263,11 @@ Additional parts:
 
 ## Future Work
 
-- [ ] Implement Tier 1 unit test framework (Unity or similar)
+- [x] Implement Tier 1 unit test framework — Unity v2.6.0, 91 assertions across 9 suites (`gf-test`)
 - [ ] Build PWM capture firmware for Pico
 - [ ] Create test harness Python library
 - [ ] Design motor test stand with safety enclosure
 - [ ] Add SRXL2 telemetry for ESC-in-loop testing
-- [ ] MSP protocol for DVR arm signal integration
 - [ ] CI integration for Tier 1 tests
 - [ ] Automated Tier 2 tests on dedicated hardware
 
